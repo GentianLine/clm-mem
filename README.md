@@ -5,11 +5,25 @@ The same model that reads and writes text also classifies its own context as
 **long-term** / **short-term** memory while decoding; a small deterministic
 eviction engine then enforces the token budget.
 
+Even though the eviction engine is deterministic the model itself is deciding
+what to keep and how important it is as its creating context instead of after its grown.
+So the model is in control but the hardware has more reliable expectations about its load
+and no new LV cache strategies are required.
+
 Design inspired by *Context Language Models* (Shao et al., arXiv:2609.37725):
 context is treated as an editable artifact mirrored to disk, and context
-management is delegated to the model via prompting — **no fine-tuning**,
+management is delegated to the model via prompting  **no fine-tuning**,
 works off-the-shelf with any OpenAI-compatible server (vLLM, Ollama,
 llama.cpp, LM Studio).
+
+One of CLMs core problems is that the method in the paper  invalidates the kvcache each request.
+This means novel improvements had/have to be made to KV cache management for the paper to be effective
+but  any improvements made would help this solution as well.
+By compacting only when the context grows to a maximum size its reducing the amount KV churn.
+
+This also means models can be improved by training within this harness and 
+then having the trained model use the harness again until it performs worse than without it.
+
 
 ## How it works
 
@@ -17,12 +31,12 @@ Every message lives in the live window as a `Block` tagged
 `longterm`, `shortterm`, or `transient`. Tagging happens two ways, using the
 generated model itself:
 
-1. **Inline ("classify as it decodes")** — a system preamble instructs the
+1. **Inline ("classify as it decodes")**  a system preamble instructs the
    model to wrap durable content in `<longterm>…</longterm>` and working
    state in `<shortterm>…</shortterm>`. The harness splits each reply on
    those markers into separately-tagged blocks and strips the markup from
    what the user sees.
-2. **Post-turn router pass** — a second cheap call to the *same* model
+2. **Post-turn router pass**   a second cheap call to the *same* model
    labels this turn's untagged blocks as JSON (`longterm / shortterm /
    transient`). `classify_mode="both"` (default) uses both paths.
 
@@ -34,7 +48,7 @@ When the window exceeds `max_context_tokens`, eviction runs in phases:
 | **2** | window is now only long+short memory | evict **shortterm FIFO in rounds**: each round keeps the newest `shortterm_keep_pct` fraction, deletes the oldest; repeats while still over budget |
 | **3** | long-term alone overflows | offload oldest long-term blocks to `archive.jsonl`, leave an evictable pointer stub (retrievable via `/recall`) |
 
-Long-term memory is never silently destroyed — it is only ever offloaded to
+Long-term memory is never silently destroyed   it is only ever offloaded to
 the archive, fixing the "can offload but can't evict" failure mode the paper's
 ContextBench exposes in tool-based baselines.
 
@@ -109,8 +123,8 @@ In-session commands:
 
 ## Demo (no GPU, no server)
 
-Exercises the full pipeline — inline tagging, router pass, all three eviction
-phases — with a deterministic stub model:
+Exercises the full pipeline   inline tagging, router pass, all three eviction
+phases   with a deterministic stub model:
 
 ```bash
 clm-mem demo --max-context-tokens 900 --shortterm-keep-pct 0.5
@@ -165,7 +179,7 @@ python -m pytest tests/ -q     # 9 tests, no GPU/server needed
   comes from letting the model *edit* the context file itself (e.g. via a
   Bash tool). The `context.md` mirror is there if you want to bolt that on.
 - Tag quality rides on the base model's zero-shot judgment; small models
-  occasionally forget the markers — the post-turn router pass is the backstop.
+  occasionally forget the markers   the post-turn router pass is the backstop.
 - Phase-3 offload keeps pointer stubs in-window, so a pathological long-term-
   heavy session still needs `--max-context-tokens` headroom for the preamble.
 
