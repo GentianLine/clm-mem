@@ -1,0 +1,26 @@
+# Frozen environment snapshot (pip freeze) for the .venv used to develop clm-mem.
+# Reproduce with:
+#     python -m venv .venv && source .venv/bin/activate
+#     pip install -r requirements.lock.txt
+#     pip install -e .                  # the package itself, editable (run from clm-mem/)
+# (clm-mem's own dependency ranges live in clm-mem/pyproject.toml -- that file
+#  is the source of truth; this lock just pins exact versions for reproducibility.)
+annotated-types==0.8.0
+anyio==4.15.1
+h11==0.16.0
+httpcore2==2.13.1
+httpx2==2.13.1
+idna==3.20
+iniconfig==2.3.1
+jiter==0.17.0
+openai==3.28.0
+packaging==26.3
+pluggy==1.6.0
+pydantic==2.14.0
+pydantic_core==2.50.0
+Pygments==2.21.0
+pytest==9.1.1
+sniffio==1.3.1
+truststore==0.10.4
+typing-inspection==0.4.4
+typing_extensions==4.16.0

@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "clm-mem"
+version = "0.1.0"
+description = "Zero-training long/short-term memory harness for open chat models (Qwen etc.), inspired by Context Language Models (arXiv:2609.37725)"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+keywords = ["llm", "memory", "context-management", "clm", "qwen", "agent"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+dependencies = [
+    "openai>=1.30",          # any OpenAI-compatible server (vLLM, Ollama, llama.cpp)
+]
+
+[project.optional-dependencies]
+tokens = ["transformers>=4.40"]   # exact token counting with the served model's tokenizer
+dev = ["pytest>=8"]
+
+[project.scripts]
+clm-mem = "clm_mem.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
