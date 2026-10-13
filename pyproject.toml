@@ -1,13 +1,8 @@
-[build-system]
-requires = ["setuptools>=68"]
-build-backend = "setuptools.build_meta"
-
 [project]
 name = "clm-mem"
 version = "0.1.0"
 description = "Zero-training long/short-term memory harness for open chat models (Qwen etc.), inspired by Context Language Models (arXiv:2609.37725)"
 readme = "README.md"
-requires-python = ">=3.10"
 license = { text = "MIT" }
 keywords = ["llm", "memory", "context-management", "clm", "qwen", "agent"]
 classifiers = [
@@ -24,6 +19,3 @@ dev = ["pytest>=8"]
 
 [project.scripts]
 clm-mem = "clm_mem.cli:main"
-
-[tool.setuptools.packages.find]
-where = ["clm-mem"]
