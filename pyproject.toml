@@ -26,4 +26,4 @@ dev = ["pytest>=8"]
 clm-mem = "clm_mem.cli:main"
 
 [tool.setuptools.packages.find]
-where = ["src"]
+where = ["clm-mem"]
