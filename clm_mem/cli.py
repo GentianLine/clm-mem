@@ -9,12 +9,12 @@ from .config import HarnessConfig
 from .harness import MemoryHarness
 from .llm import OpenAIChat, StubChat
 
-HELP = ("commands:  /status   /long   /short   /recall <text>   "
+HELP = ("commands:  /status   /long   /short   /transient   /recall <text>   "
         "/reinject <block-id>   /keep <pct>   /quit")
 
 
 def chat_loop(h: MemoryHarness) -> None:
-    print(HELP)
+    print(HELP, flush=True)
     while True:
         try:
             text = input("you> ").strip()
@@ -38,12 +38,17 @@ def chat_loop(h: MemoryHarness) -> None:
                 continue
             print(f"  shortterm_keep_pct = {h.cfg.shortterm_keep_pct:.0%}")
             continue
-        if text in ("/long", "/short"):
-            want = LONG if text == "/long" else SHORT
-            for b in h.blocks:
-                if b.tag == want:
-                    print(f"  #{b.id} t{b.turn}: "
-                          f"{textwrap.shorten(b.content, 120)}")
+        if text in ("/long", "/short", "/transient") or text.startswith(
+                ("/long ", "/short ", "/transient ")):
+            from .blocks import TRANSIENT
+            want = {"/long": LONG, "/short": SHORT,
+                    "/transient": TRANSIENT}[text.split()[0]]
+            hits = [b for b in h.blocks if b.tag == want]
+            for b in hits:
+                print(f"  #{b.id} t{b.turn}: "
+                      f"{textwrap.shorten(b.content, 120)}")
+            if not hits:
+                print(f"  (no live {want} blocks)")
             continue
         if text.startswith("/recall "):
             hits = h.recall(text[len("/recall "):])
@@ -62,9 +67,14 @@ def chat_loop(h: MemoryHarness) -> None:
             print("  re-injected as shortterm" if h.reinject(bid)
                   else "  id not in archive")
             continue
-        reply = h.step(text)
+        print("  ...working", flush=True)
+        try:
+            reply = h.step(text)
+        except Exception as e:      # a backend hiccup must not kill the session
+            print(f"ai> ERROR backend: {e}")
+            continue
         print(f"ai> {reply}")
-        print(f"    ({h.status()})")
+        print(f"    ({h.status()})", flush=True)
 
 
 def _add_common(sub: argparse.ArgumentParser) -> None:

@@ -4,7 +4,7 @@ demo and the test-suite without a GPU."""
 from __future__ import annotations
 import json
 import re
-from typing import Dict, List
+from typing import Dict, List, Optional
 from .blocks import LONG, SHORT, TRANSIENT
 
 
@@ -22,12 +22,14 @@ class OpenAIChat:
         self.temperature = temperature
         self.max_tokens = max_tokens
 
-    def chat(self, messages: List[Dict[str, str]]) -> str:
+    def chat(self, messages: List[Dict[str, str]],
+             temperature: Optional[float] = None,
+             max_tokens: Optional[int] = None) -> str:
         resp = self.client.chat.completions.create(
             model=self.model,
             messages=messages,
-            temperature=self.temperature,
-            max_tokens=self.max_tokens,
+            temperature=self.temperature if temperature is None else temperature,
+            max_tokens=self.max_tokens if max_tokens is None else max_tokens,
         )
         return resp.choices[0].message.content or ""
 
@@ -47,7 +49,9 @@ class StubChat:
     _LONG_KW = ("remember", "decision", "password", "api key", "codename",
                 "deadline", "spec", "final", "port", "schema")
 
-    def chat(self, messages: List[Dict[str, str]]) -> str:
+    def chat(self, messages: List[Dict[str, str]],
+             temperature: Optional[float] = None,
+             max_tokens: Optional[int] = None) -> str:
         first = messages[0]["content"] if messages else ""
         last = messages[-1]["content"] if messages else ""
         if "memory router" in first:
