@@ -18,6 +18,9 @@ class HarnessConfig:
     # --- classification (same model, no retraining) ------------------------
     classify_mode: str = "both"         # inline | post | both
     classifier_max_block_chars: int = 400
+    classifier_max_tokens: int = 200    # generation cap for the router pass;
+                                       # keeps a slow local backend from
+                                       # rambling on the JSON label list
 
     # --- files / serving ----------------------------------------------------
     workdir: str = "."                  # context.md / context.jsonl / archive.jsonl live here

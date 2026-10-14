@@ -63,10 +63,19 @@ class MemoryHarness:
         return self.tokens() > self.cfg.max_context_tokens
 
     # -- classification (same model, no retraining) -------------------------
-    def classify_new(self) -> None:
-        """Post-turn router pass: relabel this turn's untagged blocks."""
+    def classify_new(self, force: bool = False) -> None:
+        """Post-turn router pass: relabel this turn's untagged blocks.
+
+        In ``inline``/``both`` mode the pass is skipped when the model already
+        used inline markers for this turn -- otherwise a full extra LLM call
+        would run every single turn (the user message block is never tagged
+        inline, so an ungated check always finds candidates).
+        """
         if self.cfg.classify_mode not in ("post", "both"):
             return
+        if not force and any(b.tag in (LONG, SHORT) for b in self.blocks
+                             if b.turn == self.turn and b.role == "assistant"):
+            return  # inline tagging succeeded this turn; nothing to re-route
         cands = [b for b in self.blocks
                  if not b.pinned and b.turn == self.turn and b.tag == TRANSIENT]
         if not cands:
@@ -76,9 +85,10 @@ class MemoryHarness:
             f"{b.content[:self.cfg.classifier_max_block_chars]}"
             for b in cands)
         try:
-            raw = self.llm.chat([
-                {"role": "system", "content": CLASSIFIER_SYSTEM},
-                {"role": "user", "content": f"Conversation blocks:\n{lines}"}])
+            raw = self.llm.chat(
+                [{"role": "system", "content": CLASSIFIER_SYSTEM},
+                 {"role": "user", "content": f"Conversation blocks:\n{lines}"}],
+                temperature=0.0, max_tokens=self.cfg.classifier_max_tokens)
             data = json.loads(raw[raw.index("{"): raw.rindex("}") + 1])
         except (ValueError, KeyError):
             self.events.append("classify: unparseable router response; kept transient")
@@ -215,7 +225,15 @@ class MemoryHarness:
         self.evict()                                  # room BEFORE generating
         raw = self.llm.chat(self.serialize_messages())
         if TAG_RE.search(raw) and self.cfg.classify_mode in ("inline", "both"):
-            for tag, chunk in split_tagged(raw):      # classify as it decodes
+            parts = split_tagged(raw)
+            if any(tag != TRANSIENT for tag, _ in parts):
+                # The model honoured the inline contract: mark its untagged
+                # user message short-term instead of waiting for a router call.
+                for b in self.blocks:
+                    if (b.turn == self.turn and b.role == "user"
+                            and b.tag == TRANSIENT and not b.pinned):
+                        b.tag = SHORT
+            for tag, chunk in parts:                 # classify as it decodes
                 self.add("assistant", chunk, tag=tag)
         else:
             self.add("assistant", raw)
