@@ -4,6 +4,7 @@ import dataclasses
 import json
 import math
 import os
+import time
 from typing import Dict, List, Optional
 from .blocks import LONG, SHORT, TRANSIENT, VALID_TAGS, Block
 from .config import HarnessConfig
@@ -40,8 +41,11 @@ class MemoryHarness:
         self.counter = TokenCounter(self.cfg.tokenizer_name)
         self.blocks: List[Block] = []
         self.turn = 0
-        self.events: List[str] = []
+        # Events are structured so the web UI can render them as hints/timeline
+        # entries instead of printing raw context at the user.
+        self.events: List[Dict] = []
         self._next_id = 0
+        self._seq = 0
         if self.cfg.memory_preamble:
             self.add("system", MEMORY_PREAMBLE, tag=LONG, pinned=True)
 
@@ -57,6 +61,19 @@ class MemoryHarness:
     @property
     def context_jsonl_path(self) -> str:
         return os.path.join(self.cfg.workdir, "context.jsonl")
+
+    def _mk(self, kind: str, text: str) -> Dict:
+        """Structured event (eviction phase, classifier decision...).
+
+        `kind` is a short machine-readable label the UI maps to a visual hint:
+        evict-phase1/2/3, backstop-*, classify, warn.
+        """
+        self._seq += 1
+        return {"seq": self._seq, "t": time.time(),
+                "kind": kind, "text": text}
+
+    def _event(self, kind: str, text: str) -> None:
+        self.events.append(self._mk(kind, text))
 
     # -- basic ops ----------------------------------------------------------
     def add(self, role: str, content: str, tag: str = TRANSIENT,
@@ -101,7 +118,7 @@ class MemoryHarness:
                 self._classify_with_systemone(cands)
                 return
             except RuntimeError as e:
-                self.events.append(f"systemone classify failed: {e}")
+                self._event("classify", f"systemone classify failed: {e}")
 
         # Fall back to LLM router pass
         lines = "\n".join(
@@ -115,7 +132,8 @@ class MemoryHarness:
                 temperature=0.0, max_tokens=self.cfg.classifier_max_tokens)
             data = json.loads(raw[raw.index("{"): raw.rindex("}") + 1])
         except (ValueError, KeyError):
-            self.events.append("classify: unparseable router response; kept transient")
+            self._event("classify",
+                        "unparseable router response; kept transient")
             return
         by_id = {b.id: b for b in self.blocks}
         for lab in data.get("labels", []):
@@ -151,8 +169,8 @@ class MemoryHarness:
                 old_tag = by_id[b.id].tag
                 by_id[b.id].tag = choice
                 if old_tag != choice:
-                    self.events.append(
-                        f"systemone reclassified #{b.id}: {old_tag} -> {choice}")
+                    self._event("classify",
+                                f"reclassified #{b.id}: {old_tag} -> {choice}")
 
     # -- eviction engine ------------------------------------------------------
     def evict(self) -> List[str]:
@@ -165,7 +183,7 @@ class MemoryHarness:
         Phase 3: longterm alone overflows -> offload oldest to archive.jsonl
                  and leave an evictable pointer stub.
         """
-        log: List[str] = []
+        log: List[Dict] = []
         if not self.over_budget():
             return log
 
@@ -178,7 +196,8 @@ class MemoryHarness:
             if self.systemone:
                 doomed = self._backstop_eviction(doomed, "phase1", log)
             self._drop(doomed)
-            log.append(f"phase1: deleted {len(doomed)} transient block(s)")
+            log.append(self._mk("evict-phase1",
+                                f"deleted {len(doomed)} transient block(s)"))
 
         # Phase 2 -- shortterm FIFO, keeping `shortterm_keep_pct` per round.
         phase2_rounds = 0
@@ -196,9 +215,10 @@ class MemoryHarness:
             if not drop:
                 break  # backstop kept everything; can't make progress
             self._drop(drop)
-            log.append(f"phase2: FIFO-evicted {len(drop)} of {len(shorts)} "
-                       f"shortterm (kept newest "
-                       f"{self.cfg.shortterm_keep_pct:.0%})")
+            log.append(self._mk(
+                "evict-phase2",
+                f"FIFO-evicted {len(drop)} of {len(shorts)} shortterm "
+                f"(kept newest {self.cfg.shortterm_keep_pct:.0%})"))
 
         # Phase 3 -- longterm overflow: offload oldest, leave a pointer.
         if self.over_budget() and self.cfg.offload_overflow:
@@ -210,19 +230,25 @@ class MemoryHarness:
                 if self.systemone:
                     try:
                         if not self.systemone.should_evict(b.content):
-                            log.append(f"phase3 backstop: kept longterm #{b.id}")
+                            log.append(self._mk(
+                                "backstop-phase3",
+                                f"kept longterm #{b.id}"))
                             continue  # skip this one, try next
                     except RuntimeError as e:
-                        log.append(f"phase3 backstop error #{b.id}: {e}")
+                        log.append(self._mk(
+                            "backstop-phase3",
+                            f"backstop error #{b.id}: {e}"))
                 self._archive([b])
                 b.content = f"[offloaded longterm #{b.id} -> archive.jsonl]"
                 b.tag = SHORT   # the pointer itself is disposable later
-                log.append(f"phase3: offloaded longterm #{b.id} to archive, "
-                           f"left pointer")
+                log.append(self._mk("evict-phase3",
+                                    f"offloaded longterm #{b.id} to archive, "
+                                    f"left pointer"))
 
         if self.over_budget():
-            log.append("WARN: still over budget after all phases "
-                       "(pinned + longterm alone exceed the window)")
+            log.append(self._mk(
+                "warn", "still over budget after all phases "
+                "(pinned + longterm alone exceed the window)"))
         self.events.extend(log)
         return log
 
@@ -259,13 +285,16 @@ class MemoryHarness:
                 qid = f"drop_{b.id}"
                 noul = resp["answers"].get(qid, {}).get("noul", 0.5)
                 if noul >= self.cfg.systemone_evict_threshold:
-                    log.append(f"{phase} backstop: cleared #{b.id} (noul={noul:.2f})")
+                    log.append(self._mk(f"backstop-{phase}",
+                                        f"cleared #{b.id} (noul={noul:.2f})"))
                 else:
                     kept.append(b)
-                    log.append(f"{phase} backstop: kept #{b.id} (noul={noul:.2f})")
+                    log.append(self._mk(f"backstop-{phase}",
+                                        f"kept #{b.id} (noul={noul:.2f})"))
             return [b for b in doomed if b not in kept]
         except RuntimeError as e:
-            log.append(f"{phase} batched backstop error: {e}")
+            log.append(self._mk(f"backstop-{phase}",
+                                f"batched backstop error: {e}"))
             return doomed  # on error, evict as planned
 
     def _drop(self, doomed: List[Block]) -> None:
@@ -342,9 +371,9 @@ class MemoryHarness:
         if self.systemone:
             try:
                 tag = self.systemone.classify_memory(user_text)
-                self.events.append(f"systemone pre-classified: {tag}")
+                self._event("classify", f"pre-classified user msg -> {tag}")
             except RuntimeError as e:
-                self.events.append(f"systemone pre-classify failed: {e}")
+                self._event("classify", f"pre-classify failed: {e}")
         self.add("user", user_text, tag=tag)
 
         self.evict()                                  # room BEFORE generating
@@ -365,8 +394,8 @@ class MemoryHarness:
         self.classify_new()                           # post-turn router pass
         log = self.evict()                            # enforce budget after growth
         self.mirror_files()
-        for line in log:
-            print(f"  [evict] {line}")
+        for e in log:
+            print(f"  [evict] {e['text']}")
         return "\n".join(strip_tags(b.content) for b in self.blocks
                          if b.role == "assistant" and b.turn == self.turn)
 

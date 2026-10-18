@@ -51,7 +51,7 @@ def test_phase1_deletes_transient_keeps_memory(tmp_path):
     h.add("assistant", "PORT=8080", tag=LONG)   # add() stores raw; tags are stripped by step()
     assert h.over_budget()
     log = h.evict()
-    assert any("phase1" in l for l in log)
+    assert any(l["kind"] == "evict-phase1" for l in log)
     assert not [b for b in h.blocks if b.tag == TRANSIENT and b.turn < h.turn]
     assert any(b.content == "PORT=8080" for b in h.blocks)   # longterm survives
 
@@ -65,7 +65,7 @@ def test_phase2_fifo_rounds(tmp_path):
         h.turn += 1
         ids.append(h.add("user", f"note {i} {big}", tag=SHORT).id)
     log = h.evict()
-    assert any("phase2" in l for l in log)
+    assert any(l["kind"] == "evict-phase2" for l in log)
     live = [b.id for b in h.blocks if b.tag == SHORT]
     # oldest-first eviction: whatever survives must be the newest ids
     assert live == sorted(live, reverse=True)[: len(live)] or live == sorted(live)
@@ -93,7 +93,7 @@ def test_phase3_offloads_longterm_with_pointer(tmp_path):
         h.turn += 1
         h.add("user", f"durable {i} {big}", tag=LONG)
     log = h.evict()
-    assert any("phase3" in l for l in log)
+    assert any(l["kind"] == "evict-phase3" for l in log)
     pointers = [b for b in h.blocks if "offloaded longterm" in b.content]
     assert pointers and all(b.tag == SHORT for b in pointers)
     archived = [json.loads(l) for l in
@@ -152,7 +152,9 @@ def test_systemone_preclassification_in_step(tmp_path):
     assert user_blocks[0].tag == LONG
 
     # Check events show pre-classification happened
-    assert any("systemone pre-classified: longterm" in e for e in h.events)
+    assert any(e["kind"] == "classify"
+               and "pre-classified user msg -> longterm" in e["text"]
+               for e in h.events)
 
 
 def test_systemone_preclassification_transient(tmp_path):
@@ -186,7 +188,7 @@ def test_batched_eviction_backstop(tmp_path):
             h.step(f"Quick note {i}: filler")
 
     # Check that backstop events were logged
-    backstop_events = [e for e in h.events if "backstop" in e]
+    backstop_events = [e for e in h.events if "backstop" in e["kind"]]
     assert len(backstop_events) > 0, "Expected eviction backstop events"
 
 
@@ -204,7 +206,8 @@ def test_phase3_backstop_keeps_longterm(tmp_path):
         h.step(f"Remember: important fact {i} about port 80{i}")
 
     # Check that phase 3 backstop events exist
-    phase3_events = [e for e in h.events if "phase3 backstop" in e]
+    phase3_events = [e for e in h.events
+                     if e["kind"] == "backstop-phase3"]
     assert len(phase3_events) > 0, "Expected phase 3 backstop events"
 
 
