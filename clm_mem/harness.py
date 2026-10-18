@@ -371,6 +371,56 @@ class MemoryHarness:
                          if b.role == "assistant" and b.turn == self.turn)
 
     # -- introspection ---------------------------------------------------------------
+    def live_blocks(self, tag: str = "") -> List[Block]:
+        return [b for b in self.blocks if not tag or b.tag == tag]
+
+    def block_by_id(self, block_id: int) -> Optional[Block]:
+        for b in self.blocks:
+            if b.id == block_id:
+                return b
+        return None
+
+    def archive_size(self) -> int:
+        """Number of archived records (cheap line count)."""
+        if not os.path.exists(self.archive_path):
+            return 0
+        with open(self.archive_path, encoding="utf-8") as f:
+            return sum(1 for _ in f)
+
+    def snapshot(self, preview_chars: int = 320, events_tail: int = 24,
+                 include_full: bool = False) -> Dict:
+        """JSON-friendly view of the live window -- what the web UI renders.
+
+        Blocks carry a `preview` plus token counts so the UI can show hints
+        (long/short/transient badges, truncation markers) without ever
+        printing raw context at the user.
+        """
+        blocks = []
+        for b in self.blocks:
+            entry = {
+                "id": b.id, "role": b.role, "tag": b.tag, "turn": b.turn,
+                "pinned": b.pinned,
+                "tokens": self.counter.count_block(b),
+                "chars": len(b.content),
+            }
+            if include_full or len(b.content) <= preview_chars:
+                entry["content"] = b.content
+                entry["truncated"] = False
+            else:
+                entry["content"] = b.content[:preview_chars]
+                entry["truncated"] = True
+            blocks.append(entry)
+        return {
+            "turn": self.turn,
+            "tokens": self.tokens(),
+            "budget": self.cfg.max_context_tokens,
+            "counts": self.counts(),
+            "shortterm_keep_pct": self.cfg.shortterm_keep_pct,
+            "archive": self.archive_size(),
+            "blocks": blocks,
+            "events": self.events[-events_tail:],
+        }
+
     def counts(self) -> Dict[str, int]:
         out = {LONG: 0, SHORT: 0, TRANSIENT: 0}
         for b in self.blocks:
