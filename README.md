@@ -93,6 +93,66 @@ vllm serve Qwen/Qwen3-8B-Instruct --max-model-len 16384
 ollama pull qwen3:8b
 ```
 
+## Drop-in llama.cpp server: `clm-mem serve`
+
+`clm-mem serve` turns the harness into a **single llama.cpp-shaped endpoint**:
+to any OpenAI/llama.cpp client (Unsloth Studio, openai-python, text-gen-webui,
+an LLM agent runtime...) it looks like one ordinary server at one host:port.
+Behind it, `serve` brings up 2-3 background processes and wires the memory
+harness into every request that carries a session header:
+
+```
+client ──http──> clm-mem proxy :8080          <- what clients talk to
+                    ├── llama-server / Unsloth / vLLM / Ollama backend :auto
+                    └── System One decision server (fork or mock)   :auto
+```
+
+Nothing is downloaded or compiled by `serve`  it only execs binaries or URLs
+you point it at. With `--use-mock` it runs the bundled fake backends so the
+whole stack works with no GPU and no weights.
+
+```bash
+# smoke-test the whole topology (mock backend + mock SystemOne):
+clm-mem serve --use-mock --port 8080 --served-model mock-model \
+    --max-context-tokens 600 --workdir /tmp/clm-serve
+
+# real llama.cpp behind it:
+clm-mem serve --port 8080 --llama-server ./build/bin/llama-server \
+    --model-file models/Qwen3-8B-IQ2_K.gguf --ctx-size 16384 \
+    --systemone-passthrough          # fork build answers /v1/systemone itself
+
+# already-running server + separate SystemOne API:
+clm-mem serve --backend-url http://localhost:8000/v1 \
+    --systemone-url http://localhost:8010
+```
+
+`serve` prints a machine-readable READY line (JSON) once everything is up:
+
+```json
+{"ready": true, "base_url": "http://127.0.0.1:8080/v1", "root_url": "http://127.0.0.1:8080",
+ "model": "mock-model", "backend": "http://127.0.0.1:...", "systemone": "http://127.0.0.1:...",
+ "processes": {"backend-mock": "...", "systemone-mock": "..."}}
+```
+
+**Client contract.** Point any OpenAI client at `base_url` with `api_key="EMPTY"`.
+Requests *without* a session header are pure passthrough (behaves exactly like
+plain llama.cpp). Requests *with* the header go through the memory harness:
+
+```python
+import openai
+client = openai.OpenAI(base_url="http://localhost:8080/v1", api_key="EMPTY",
+                       default_headers={"X-Cllm-Mem-Session": "unsloth-user"})
+client.chat.completions.create(model="mock-model",
+    messages=[{"role": "user",
+               "content": "Remember: the deploy port is 8080."}])   # memory applies
+```
+
+Supported surface (llama.cpp + OpenAI union): `/v1/chat/completions` (incl.
+SSE streaming), `/v1/models`, `/v1/systemone`, native `/completion`,
+`/props`, `/metrics`, `/version`, `/health`, CORS preflight, plus clm-mem
+introspection routes `/v1/clm/sessions`, `/v1/clm/sessions/<id>/status`,
+`.../reset`, and `DELETE /v1/clm/sessions/<id>`.
+
 ## Run the chat harness
 
 ```bash
@@ -170,7 +230,7 @@ print(h.recall("8080"))                   # search evicted/offloaded memory
 With the venv active (`source .venv/bin/activate`):
 
 ```bash
-python -m pytest tests/ -q     # 9 tests, no GPU/server needed
+python -m pytest tests/ -q     # harness + serve/proxy tests, no GPU/server needed
 ```
 
 ## Limitations vs. the paper

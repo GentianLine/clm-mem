@@ -77,11 +77,8 @@ def chat_loop(h: MemoryHarness) -> None:
         print(f"    ({h.status()})", flush=True)
 
 
-def _add_common(sub: argparse.ArgumentParser) -> None:
-    sub.add_argument("--base-url", default="http://localhost:8000/v1",
-                     help="OpenAI-compatible endpoint (vLLM/Ollama/...)")
-    sub.add_argument("--model", default="Qwen/Qwen3-8B-Instruct")
-    sub.add_argument("--api-key", default="EMPTY")
+def _add_harness_flags(sub: argparse.ArgumentParser) -> None:
+    """Harness knobs shared by chat / demo / serve (no endpoint args)."""
     sub.add_argument("--temperature", type=float, default=0.6)
     sub.add_argument("--max-tokens", type=int, default=1024,
                      help="generation cap per reply")
@@ -97,23 +94,35 @@ def _add_common(sub: argparse.ArgumentParser) -> None:
                      help="HF tokenizer id for exact token counts (optional)")
     sub.add_argument("--workdir", default=".",
                      help="where context.md / context.jsonl / archive.jsonl live")
-    sub.add_argument("--systemone-url", default="http://127.0.0.1:8010",
-                     help="System One Lite API URL for typed decisions "
-                          "(pre-classification + eviction backstop). "
-                          "Set to 'none' to disable.")
     sub.add_argument("--evict-threshold", type=float, default=0.7,
                      help="SystemOne noul confidence needed to approve eviction "
                           "(higher = more conservative, keep more memory)")
 
 
-def _cfg(a: argparse.Namespace) -> HarnessConfig:
+def _add_common(sub: argparse.ArgumentParser) -> None:
+    """Backend endpoint args + harness flags (chat / demo)."""
+    sub.add_argument("--base-url", default="http://localhost:8000/v1",
+                     help="OpenAI-compatible endpoint (vLLM/Ollama/...)")
+    sub.add_argument("--model", default="Qwen/Qwen3-8B-Instruct")
+    sub.add_argument("--api-key", default="EMPTY")
+    _add_harness_flags(sub)
+    sub.add_argument("--systemone-url", default="http://127.0.0.1:8010",
+                     help="System One Lite API URL for typed decisions "
+                          "(pre-classification + eviction backstop). "
+                          "Set to 'none' to disable.")
+
+
+def _cfg(a: argparse.Namespace,
+         fallback_model: Optional[str] = None) -> HarnessConfig:
+    fb = fallback_model if fallback_model is not None \
+        else getattr(a, "model", "")
     return HarnessConfig(
         max_context_tokens=a.max_context_tokens,
         shortterm_keep_pct=a.shortterm_keep_pct,
         keep_recent_turns=a.keep_recent_turns,
         classify_mode=a.classify_mode,
         workdir=a.workdir,
-        tokenizer_name=a.tokenizer or a.model,
+        tokenizer_name=a.tokenizer or fb,
         systemone_evict_threshold=a.evict_threshold,
     )
 
@@ -170,6 +179,113 @@ def cmd_demo(a: argparse.Namespace) -> None:
     print(f"\n/recall 'Nova' -> {len(hits)} archived hit(s); e.g. {sample}")
 
 
+def _add_serve_flags(sub: argparse.ArgumentParser) -> None:
+    sub.add_argument("--host", dest="public_host", default="127.0.0.1",
+                     help="address the public llama.cpp-compatible endpoint binds")
+    sub.add_argument("--port", dest="public_port", type=int, default=8080)
+    sub.add_argument("--served-model", default="clm-mem-model",
+                     help="model id advertised to clients")
+    sub.add_argument("--use-mock", action="store_true",
+                     help="run the bundled mock backend + mock SystemOne "
+                          "(no GPU, no binaries needed)")
+    sub.add_argument("--llama-server", dest="llama_server_bin", default="",
+                     help="llama-server binary to spawn behind the proxy")
+    sub.add_argument("--model-file", dest="model_path", default="",
+                     help="GGUF/weights path passed to llama-server --model")
+    sub.add_argument("--ctx-size", type=int, default=0,
+                     help="context size passed to llama-server (optional)")
+    sub.add_argument("--backend-url", default="",
+                     help="root (or /v1) URL of an already-running server "
+                          "to proxy instead of spawning one")
+    sub.add_argument("--systemone-binary", dest="systemone_bin", default="",
+                     help="SystemOne fork/server binary to spawn behind the proxy")
+    sub.add_argument("--systemone-url", default="",
+                     help="URL of an already-running System One API")
+    sub.add_argument("--systemone-passthrough", action="store_true",
+                     help="the backend itself answers /v1/systemone "
+                          "(SystemOne fork build)")
+    sub.add_argument("--log-dir", default="",
+                     help="where backend process logs go (default: tmpdir)")
+    sub.add_argument("--json", action="store_true",
+                     help="print only the machine-readable READY line")
+    _add_harness_flags(sub)
+
+
+def cmd_serve(a: argparse.Namespace) -> None:
+    """One llama.cpp-shaped endpoint in front, 2-3 processes behind."""
+    import dataclasses as _dc
+    import json as _json
+    import time as _time
+    from .server import start_supervisor
+
+    harness_kwargs = _dc.asdict(_cfg(a, ""))
+
+    if a.use_mock:
+        backend_mode = "mock"
+    elif a.backend_url:
+        backend_mode = "external"
+    elif a.llama_server_bin:
+        backend_mode = "spawn"
+    else:
+        sys.exit("error: pick a backend: --use-mock, --backend-url URL, "
+                 "or --llama-server PATH")
+
+    backend_cmd = None
+    if backend_mode == "spawn":
+        backend_cmd = [a.llama_server_bin]
+        if a.model_path:
+            backend_cmd += ["--model", a.model_path]
+        if a.ctx_size:
+            backend_cmd += ["--ctx-size", str(a.ctx_size)]
+
+    sys_cmd = None
+    if a.systemone_passthrough:
+        sys_mode = "passthrough"
+    elif a.use_mock:
+        sys_mode = "mock"
+    elif a.systemone_bin:
+        sys_mode, sys_cmd = "spawn", [a.systemone_bin]
+    elif a.systemone_url:
+        sys_mode = "external"
+    else:
+        sys_mode = "none"
+
+    sup = start_supervisor(
+        public_host=a.public_host, public_port=a.public_port,
+        served_model=a.served_model,
+        backend_mode=backend_mode, backend_cmd=backend_cmd,
+        backend_url=a.backend_url or None,
+        systemone_mode=sys_mode,
+        systemone_cmd=sys_cmd if sys_mode == "spawn" else None,
+        systemone_url=a.systemone_url or None,
+        harness_kwargs=harness_kwargs,
+        chat_temperature=a.temperature, chat_max_tokens=a.max_tokens,
+        log_dir=a.log_dir or None)
+
+    procs = {h.name: f"{h.host}:{h.port}"
+             for h in sup.manager.handles if h.alive()}
+    ready = {"ready": True, "base_url": sup.public_base,
+             "root_url": sup.base_url, "model": a.served_model,
+             "backend": sup.config.backend_root,
+             "systemone": sup.config.systemone_root,
+             "processes": procs}
+    if not a.json:
+        print(f"clm-mem serve | llama.cpp-compatible drop-in at {sup.public_base}")
+        print(f"  advertised model : {a.served_model}")
+        print(f"  chat backend     : {sup.config.backend_root or '(none)'}")
+        print(f"  systemone api    : {sup.config.systemone_root or '(none)'}")
+        print("  memory sessions  : send header "
+              f"X-Cllm-Mem-Session: <id> on chat requests")
+    print(_json.dumps(ready), flush=True)
+    try:
+        while True:
+            _time.sleep(3600)
+    except KeyboardInterrupt:                          # pragma: no cover
+        print("\nshutting down...", flush=True)
+    finally:
+        sup.shutdown()
+
+
 def main(argv: Optional[List[str]] = None) -> None:
     p = argparse.ArgumentParser(
         prog="clm-mem",
@@ -179,12 +295,17 @@ def main(argv: Optional[List[str]] = None) -> None:
     sub = p.add_subparsers(dest="cmd", required=True)
     sc = sub.add_parser("chat", help="interactive chat with memory management")
     sd = sub.add_parser("demo", help="offline eviction simulation (no server needed)")
+    ss = sub.add_parser("serve", help="llama.cpp-compatible drop-in server "
+                                      "(proxy + backend + optional SystemOne)")
     for s in (sc, sd):
         _add_common(s)
+    _add_serve_flags(ss)
     a = p.parse_args(argv)
     try:
         if a.cmd == "chat":
             cmd_chat(a)
+        elif a.cmd == "serve":
+            cmd_serve(a)
         else:
             cmd_demo(a)
     except ValueError as e:
