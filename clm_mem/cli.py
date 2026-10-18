@@ -7,7 +7,7 @@ from typing import List, Optional
 from .blocks import LONG, SHORT
 from .config import HarnessConfig
 from .harness import MemoryHarness
-from .llm import OpenAIChat, StubChat
+from .llm import OpenAIChat, StubChat, SystemOneClient
 
 HELP = ("commands:  /status   /long   /short   /transient   /recall <text>   "
         "/reinject <block-id>   /keep <pct>   /quit")
@@ -97,6 +97,13 @@ def _add_common(sub: argparse.ArgumentParser) -> None:
                      help="HF tokenizer id for exact token counts (optional)")
     sub.add_argument("--workdir", default=".",
                      help="where context.md / context.jsonl / archive.jsonl live")
+    sub.add_argument("--systemone-url", default="http://127.0.0.1:8010",
+                     help="System One Lite API URL for typed decisions "
+                          "(pre-classification + eviction backstop). "
+                          "Set to 'none' to disable.")
+    sub.add_argument("--evict-threshold", type=float, default=0.7,
+                     help="SystemOne noul confidence needed to approve eviction "
+                          "(higher = more conservative, keep more memory)")
 
 
 def _cfg(a: argparse.Namespace) -> HarnessConfig:
@@ -107,13 +114,32 @@ def _cfg(a: argparse.Namespace) -> HarnessConfig:
         classify_mode=a.classify_mode,
         workdir=a.workdir,
         tokenizer_name=a.tokenizer or a.model,
+        systemone_evict_threshold=a.evict_threshold,
     )
 
 
 def cmd_chat(a: argparse.Namespace) -> None:
     llm = OpenAIChat(base_url=a.base_url, model=a.model, api_key=a.api_key,
                      temperature=a.temperature, max_tokens=a.max_tokens)
-    h = MemoryHarness(llm, _cfg(a))
+
+    # Wire up SystemOne for typed decisions if configured
+    systemone = None
+    if a.systemone_url and a.systemone_url.lower() != "none":
+        try:
+            import urllib.request
+            req = urllib.request.Request(a.systemone_url + "/v1/systemone",
+                                         data=b'{"state":"test","questions":{"q":{"type":"noul","instructions":"test"}}}',
+                                         headers={"Content-Type": "application/json"},
+                                         method="POST")
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                resp.read()
+            systemone = SystemOneClient(a.systemone_url)
+            print(f"SystemOne decision API: {a.systemone_url} (OK)")
+        except Exception as e:
+            print(f"WARNING: SystemOne API unreachable at {a.systemone_url}: {e}")
+            print("         Pre-classification and eviction backstop will be skipped.")
+
+    h = MemoryHarness(llm, _cfg(a), systemone=systemone)
     print(f"clm-mem | {h.status()}\nbackend: {a.base_url} -> {a.model}")
     chat_loop(h)
 
@@ -122,7 +148,11 @@ def cmd_demo(a: argparse.Namespace) -> None:
     """Offline simulation with StubChat -- exercises all three eviction phases."""
     cfg = _cfg(a)
     cfg.max_context_tokens = min(cfg.max_context_tokens, 2048)
-    h = MemoryHarness(StubChat(), cfg)
+
+    # Use mock SystemOne to exercise typed decision code paths offline
+    from .llm import MockSystemOne
+    h = MemoryHarness(StubChat(), cfg, systemone=MockSystemOne())
+    print("demo mode: using mock SystemOne (no HTTP calls)")
     filler = ("Here is a longish status update with plenty of incidental detail "
               "that eats tokens while we work. " * 3)
     msgs = [f"Remember: project codename Nova-{i}, port 80{i}. {filler}"

@@ -3,3 +3,7 @@
 .*
 *.egg*
 __pycache__/
+
+context.md
+context.jsonl
+archive.jsonl

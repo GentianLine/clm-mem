@@ -104,6 +104,118 @@ def test_phase3_offloads_longterm_with_pointer(tmp_path):
 
 
 # -- end-to-end -------------------------------------------------------------------
+# --- SystemOne integration tests -------------------------------------------
+
+from clm_mem.llm import MockSystemOne
+from clm_mem.blocks import LONG, SHORT, TRANSIENT
+
+
+def test_mock_systemone_classify_longterm():
+    """MockSystemOne should classify factual content as longterm."""
+    m = MockSystemOne()
+    assert m.classify_memory("Remember: API key is KEY-123") == LONG
+    assert m.classify_memory("The project codename is Aurora") == LONG
+
+
+def test_mock_systemone_classify_transient():
+    """MockSystemOne should classify short filler as transient."""
+    m = MockSystemOne()
+    assert m.classify_memory("How are you?") == TRANSIENT
+    assert m.classify_memory("Thanks!") == TRANSIENT
+
+
+def test_mock_systemone_classify_shortterm():
+    """MockSystemOne should classify working state as shortterm."""
+    m = MockSystemOne()
+    assert m.classify_memory("I need to review the diff for PR #45 and check the build status") == SHORT
+
+
+def test_mock_systemone_should_evict():
+    """MockSystemOne should approve eviction of filler, reject facts."""
+    m = MockSystemOne()
+    assert m.should_evict("Hi there!") is True  # short filler
+    assert m.should_evict("Remember: password is secret123") is False  # has fact
+
+
+def test_systemone_preclassification_in_step(tmp_path):
+    """User inputs should be pre-classified before being sent to LLM."""
+    from clm_mem.harness import MemoryHarness
+    from clm_mem.llm import StubChat
+
+    h = MemoryHarness(StubChat(), systemone=MockSystemOne())
+    h.cfg.workdir = str(tmp_path)
+
+    # Longterm fact should be classified as longterm immediately
+    h.step("Remember: project codename is Nova-1")
+    user_blocks = [b for b in h.blocks if b.role == "user" and b.turn == 1]
+    assert len(user_blocks) == 1
+    assert user_blocks[0].tag == LONG
+
+    # Check events show pre-classification happened
+    assert any("systemone pre-classified: longterm" in e for e in h.events)
+
+
+def test_systemone_preclassification_transient(tmp_path):
+    """Small talk should be pre-classified as transient."""
+    from clm_mem.harness import MemoryHarness
+    from clm_mem.llm import StubChat
+
+    h = MemoryHarness(StubChat(), systemone=MockSystemOne())
+    h.cfg.workdir = str(tmp_path)
+
+    h.step("How are you today?")
+    user_blocks = [b for b in h.blocks if b.role == "user" and b.turn == 1]
+    assert len(user_blocks) == 1
+    assert user_blocks[0].tag == TRANSIENT
+
+
+def test_batched_eviction_backstop(tmp_path):
+    """Eviction backstops should batch SystemOne calls."""
+    from clm_mem.harness import MemoryHarness
+    from clm_mem.llm import StubChat, MockSystemOne
+
+    h = MemoryHarness(StubChat(), systemone=MockSystemOne())
+    h.cfg.workdir = str(tmp_path)
+    h.cfg.max_context_tokens = 300  # force eviction quickly
+
+    # Add several turns to trigger eviction
+    for i in range(5):
+        if i % 2 == 0:
+            h.step(f"Remember: fact number {i}")
+        else:
+            h.step(f"Quick note {i}: filler")
+
+    # Check that backstop events were logged
+    backstop_events = [e for e in h.events if "backstop" in e]
+    assert len(backstop_events) > 0, "Expected eviction backstop events"
+
+
+def test_phase3_backstop_keeps_longterm(tmp_path):
+    """Phase 3 should consult SystemOne before offloading longterm memory."""
+    from clm_mem.harness import MemoryHarness
+    from clm_mem.llm import StubChat, MockSystemOne
+
+    h = MemoryHarness(StubChat(), systemone=MockSystemOne())
+    h.cfg.workdir = str(tmp_path)
+    h.cfg.max_context_tokens = 200  # very small to force phase 3
+
+    # Add longterm facts that should trigger phase 3 eviction
+    for i in range(6):
+        h.step(f"Remember: important fact {i} about port 80{i}")
+
+    # Check that phase 3 backstop events exist
+    phase3_events = [e for e in h.events if "phase3 backstop" in e]
+    assert len(phase3_events) > 0, "Expected phase 3 backstop events"
+
+
+def test_evict_threshold_config():
+    """systemone_evict_threshold should be configurable."""
+    from clm_mem.config import HarnessConfig
+
+    cfg = HarnessConfig(systemone_evict_threshold=0.9)
+    assert cfg.systemone_evict_threshold == 0.9
+
+
 def test_end_to_end_stays_under_budget(tmp_path):
     h = make_harness(tmp_path, budget=600, keep=0.5, preamble=True)
     for i in range(24):

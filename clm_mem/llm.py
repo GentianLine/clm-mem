@@ -1,10 +1,13 @@
 """LLM clients. Anything with a ``chat(messages) -> str`` method works;
 OpenAIChat targets any OpenAI-compatible server, StubChat powers the offline
-demo and the test-suite without a GPU."""
+demo and the test-suite without a GPU.
+
+SystemOneClient wraps the System One Lite decision API (http://127.0.0.1:8010)
+for typed questions -- used for memory classification and eviction backstops."""
 from __future__ import annotations
 import json
 import re
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 from .blocks import LONG, SHORT, TRANSIENT
 
 
@@ -69,3 +72,160 @@ class StubChat:
                 TRANSIENT if len(txt) < 60 else SHORT)
             labels.append({"id": int(bid), "tag": tag})
         return json.dumps({"labels": labels})
+
+
+class SystemOneClient:
+    """HTTP client for the System One Lite decision API.
+
+    Sends typed questions (choice, score, noul) and returns calibrated
+    answers. Used for memory classification and eviction backstops.
+
+    Default base URL is http://127.0.0.1:8010 (local System One Lite server).
+    """
+
+    def __init__(self, base_url: str = "http://127.0.0.1:8010"):
+        self.base_url = base_url.rstrip("/")
+
+    def system_one(self, state: Any, questions: Dict[str, Any]) -> Dict[str, Any]:
+        """Evaluate a state against typed questions.
+
+        Args:
+            state: The input text or JSON object to evaluate.
+            questions: Dict of question_id -> question spec. Each spec has
+                'type' (choice/score/noul), 'instructions', and type-specific
+                fields ('criteria' for choice, etc.).
+
+        Returns:
+            Response dict with 'answers' keyed by question_id.
+        """
+        import urllib.request
+        import urllib.error
+
+        body = json.dumps({"state": state, "questions": questions}).encode()
+        req = urllib.request.Request(
+            f"{self.base_url}/v1/systemone",
+            data=body,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                return json.loads(resp.read().decode())
+        except urllib.error.URLError as e:
+            raise RuntimeError(f"SystemOne API error: {e}") from e
+
+    def classify_memory(self, text: str) -> str:
+        """Classify a conversation block's memory duration.
+
+        Returns one of 'longterm', 'shortterm', or 'transient'.
+        """
+        questions = {
+            "duration": {
+                "type": "choice",
+                "instructions": (
+                    "What memory duration should this conversation block have? "
+                    "Choose based on whether it contains durable facts/decisions "
+                    "that must survive long-term, working state needed for a while, "
+                    "or transient chatter that can be forgotten."
+                ),
+                "criteria": {
+                    LONG: "Durable facts, decisions, IDs, specs, credentials, requirements likely needed much later",
+                    SHORT: "Working state, intermediate reasoning, recent task output useful for a while but not forever",
+                    TRANSIENT: "Pleasantries, filler, redundant restatement, small talk, ephemeral chatter"
+                }
+            }
+        }
+        resp = self.system_one({"text": text}, questions)
+        return resp["answers"]["duration"]["choice"]
+
+    def should_evict(self, block_content: str) -> bool:
+        """Backstop check: is this block safe to evict from live memory?
+
+        Returns True if safe to drop, False if it should be kept.
+        """
+        questions = {
+            "safe_to_drop": {
+                "type": "noul",
+                "instructions": (
+                    "Is this conversation block safe to remove from the live "
+                    "context window? Answer yes only if it's transient chatter, "
+                    "redundant information, or content that won't be needed again. "
+                    "Answer no if it contains facts, decisions, working state, or "
+                    "anything that might be referenced later."
+                )
+            }
+        }
+        resp = self.system_one({"block": block_content}, questions)
+        # noul >= 0.7 means reasonably confident it's safe to drop
+        return resp["answers"]["safe_to_drop"]["noul"] >= 0.7
+
+
+class MockSystemOne:
+    """Offline mock of SystemOneClient for testing and demo mode.
+
+    Uses keyword heuristics instead of an actual model to simulate typed
+    decisions. No HTTP calls required.
+    """
+
+    _LONG_KW = ("remember", "decision", "password", "api key", "codename",
+                "deadline", "spec", "final", "port", "schema")
+
+    def __init__(self):
+        pass
+
+    def system_one(self, state: Any, questions: Dict[str, Any]) -> Dict[str, Any]:
+        """Simulate typed decisions using keyword heuristics."""
+        answers = {}
+        for qid, spec in questions.items():
+            if spec["type"] == "choice":
+                # Extract text from state
+                if isinstance(state, dict):
+                    text = " ".join(str(v) for v in state.values())
+                else:
+                    text = str(state)
+                low = text.lower()
+                if any(k in low for k in self._LONG_KW):
+                    answers[qid] = {"type": "choice", "choice": LONG,
+                                    "confidence": 0.85}
+                elif len(text) < 60:
+                    answers[qid] = {"type": "choice", "choice": TRANSIENT,
+                                    "confidence": 0.75}
+                else:
+                    answers[qid] = {"type": "choice", "choice": SHORT,
+                                    "confidence": 0.80}
+            elif spec["type"] == "noul":
+                # Simulate: short/filler content is safe to drop
+                if isinstance(state, dict):
+                    text = " ".join(str(v) for v in state.values())
+                else:
+                    text = str(state)
+                low = text.lower()
+                has_facts = any(k in low for k in self._LONG_KW)
+                is_short = len(text) < 60
+                # High noul (yes, safe to drop) for short filler without facts
+                if is_short and not has_facts:
+                    answers[qid] = {"type": "noul", "noul": 0.85}
+                elif has_facts:
+                    answers[qid] = {"type": "noul", "noul": 0.25}
+                else:
+                    answers[qid] = {"type": "noul", "noul": 0.60}
+            else:
+                answers[qid] = {"type": spec["type"]}
+        return {"answers": answers, "model": "mock-systemone"}
+
+    def classify_memory(self, text: str) -> str:
+        """Mock classification using keyword heuristics."""
+        low = text.lower()
+        if any(k in low for k in self._LONG_KW):
+            return LONG
+        elif len(text) < 60:
+            return TRANSIENT
+        else:
+            return SHORT
+
+    def should_evict(self, block_content: str) -> bool:
+        """Mock eviction decision using keyword heuristics."""
+        low = block_content.lower()
+        has_facts = any(k in low for k in self._LONG_KW)
+        is_short = len(block_content) < 60
+        return (is_short and not has_facts) or not has_facts

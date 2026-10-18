@@ -22,6 +22,9 @@ class HarnessConfig:
                                        # keeps a slow local backend from
                                        # rambling on the JSON label list
 
+    # --- SystemOne decision API --------------------------------------------
+    systemone_evict_threshold: float = 0.7  # noul confidence needed to evict
+
     # --- files / serving ----------------------------------------------------
     workdir: str = "."                  # context.md / context.jsonl / archive.jsonl live here
     tokenizer_name: str = ""            # HF tokenizer id for exact counts (optional)

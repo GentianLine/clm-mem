@@ -23,9 +23,20 @@ class MemoryHarness:
       5. evict again, then mirror the window to ``context.md`` / ``context.jsonl``.
     """
 
-    def __init__(self, llm, cfg: Optional[HarnessConfig] = None):
+    def __init__(self, llm, cfg: Optional[HarnessConfig] = None,
+                 systemone=None):
+        """
+        Args:
+            llm: Chat backend with chat(messages) -> str method.
+            cfg: Harness configuration.
+            systemone: Optional SystemOneClient for typed decision queries
+                (pre-classification + eviction backstop). If provided, user
+                messages are classified before being sent to the LLM, and
+                eviction checks run a backstop query before dropping blocks.
+        """
         self.llm = llm
         self.cfg = cfg or HarnessConfig()
+        self.systemone = systemone
         self.counter = TokenCounter(self.cfg.tokenizer_name)
         self.blocks: List[Block] = []
         self.turn = 0
@@ -66,6 +77,9 @@ class MemoryHarness:
     def classify_new(self, force: bool = False) -> None:
         """Post-turn router pass: relabel this turn's untagged blocks.
 
+        Uses SystemOne choice questions when available (faster, typed),
+        falls back to LLM call otherwise.
+
         In ``inline``/``both`` mode the pass is skipped when the model already
         used inline markers for this turn -- otherwise a full extra LLM call
         would run every single turn (the user message block is never tagged
@@ -80,6 +94,16 @@ class MemoryHarness:
                  if not b.pinned and b.turn == self.turn and b.tag == TRANSIENT]
         if not cands:
             return
+
+        # Prefer SystemOne choice questions (typed, faster)
+        if self.systemone:
+            try:
+                self._classify_with_systemone(cands)
+                return
+            except RuntimeError as e:
+                self.events.append(f"systemone classify failed: {e}")
+
+        # Fall back to LLM router pass
         lines = "\n".join(
             f"id={b.id} role={b.role} text="
             f"{b.content[:self.cfg.classifier_max_block_chars]}"
@@ -98,6 +122,37 @@ class MemoryHarness:
             bid, tag = lab.get("id"), str(lab.get("tag", "")).lower()
             if bid in by_id and tag in VALID_TAGS and not by_id[bid].pinned:
                 by_id[bid].tag = tag
+
+    def _classify_with_systemone(self, cands: List[Block]) -> None:
+        """Batched post-turn classification using SystemOne choice questions."""
+        questions = {}
+        for b in cands:
+            questions[f"tag_{b.id}"] = {
+                "type": "choice",
+                "instructions": (
+                    f"What memory duration should this conversation block have? "
+                    f"Role: {b.role}. Content: {b.content[:self.cfg.classifier_max_block_chars]}"
+                ),
+                "criteria": {
+                    LONG: "Durable facts, decisions, IDs, specs, credentials, requirements likely needed much later",
+                    SHORT: "Working state, intermediate reasoning, recent task output useful for a while but not forever",
+                    TRANSIENT: "Pleasantries, filler, redundant restatement, small talk, ephemeral chatter"
+                }
+            }
+
+        resp = self.systemone.system_one(
+            {"blocks": [b.content for b in cands]}, questions)
+
+        by_id = {b.id: b for b in self.blocks}
+        for b in cands:
+            qid = f"tag_{b.id}"
+            choice = resp["answers"].get(qid, {}).get("choice", TRANSIENT)
+            if choice in VALID_TAGS and not by_id[b.id].pinned:
+                old_tag = by_id[b.id].tag
+                by_id[b.id].tag = choice
+                if old_tag != choice:
+                    self.events.append(
+                        f"systemone reclassified #{b.id}: {old_tag} -> {choice}")
 
     # -- eviction engine ------------------------------------------------------
     def evict(self) -> List[str]:
@@ -119,17 +174,27 @@ class MemoryHarness:
         doomed = [b for b in self.blocks
                   if b.tag == TRANSIENT and not b.pinned and b.turn < min_turn]
         if doomed:
+            # Backstop: ask SystemOne before clearing memory (batched)
+            if self.systemone:
+                doomed = self._backstop_eviction(doomed, "phase1", log)
             self._drop(doomed)
             log.append(f"phase1: deleted {len(doomed)} transient block(s)")
 
         # Phase 2 -- shortterm FIFO, keeping `shortterm_keep_pct` per round.
-        while self.over_budget():
+        phase2_rounds = 0
+        while self.over_budget() and phase2_rounds < 10:  # prevent infinite loop
+            phase2_rounds += 1
             shorts = sorted((b for b in self.blocks if b.tag == SHORT),
                             key=lambda b: b.id)
             if not shorts:
                 break
             keep_n = math.floor(len(shorts) * self.cfg.shortterm_keep_pct)
             drop = shorts[: len(shorts) - keep_n] or shorts[:1]  # guarantee progress
+            # Backstop: ask SystemOne before clearing memory (batched)
+            if self.systemone:
+                drop = self._backstop_eviction(drop, "phase2", log)
+            if not drop:
+                break  # backstop kept everything; can't make progress
             self._drop(drop)
             log.append(f"phase2: FIFO-evicted {len(drop)} of {len(shorts)} "
                        f"shortterm (kept newest "
@@ -141,6 +206,14 @@ class MemoryHarness:
                             if b.tag == LONG and not b.pinned), key=lambda b: b.id)
             while self.over_budget() and longs:
                 b = longs.pop(0)
+                # Backstop: ask SystemOne before offloading longterm memory
+                if self.systemone:
+                    try:
+                        if not self.systemone.should_evict(b.content):
+                            log.append(f"phase3 backstop: kept longterm #{b.id}")
+                            continue  # skip this one, try next
+                    except RuntimeError as e:
+                        log.append(f"phase3 backstop error #{b.id}: {e}")
                 self._archive([b])
                 b.content = f"[offloaded longterm #{b.id} -> archive.jsonl]"
                 b.tag = SHORT   # the pointer itself is disposable later
@@ -152,6 +225,48 @@ class MemoryHarness:
                        "(pinned + longterm alone exceed the window)")
         self.events.extend(log)
         return log
+
+    def _backstop_eviction(self, doomed: List[Block], phase: str,
+                           log: List[str]) -> List[Block]:
+        """Batched SystemOne backstop: ask which blocks are safe to evict.
+
+        Sends all candidates in a single API call with one noul question per
+        block. Returns the subset that SystemOne approved for eviction.
+        """
+        if not doomed or not self.systemone:
+            return doomed
+
+        questions = {}
+        for b in doomed:
+            questions[f"drop_{b.id}"] = {
+                "type": "noul",
+                "instructions": (
+                    f"Is this {phase} conversation block safe to remove from the "
+                    "live context window? Answer yes only if it's transient chatter, "
+                    "redundant information, or content that won't be needed again. "
+                    "Answer no if it contains facts, decisions, working state, or "
+                    "anything that might be referenced later."
+                )
+            }
+
+        try:
+            # Batch all eviction candidates into one SystemOne call
+            resp = self.systemone.system_one(
+                {"blocks": [b.content for b in doomed]}, questions)
+
+            kept = []
+            for i, b in enumerate(doomed):
+                qid = f"drop_{b.id}"
+                noul = resp["answers"].get(qid, {}).get("noul", 0.5)
+                if noul >= self.cfg.systemone_evict_threshold:
+                    log.append(f"{phase} backstop: cleared #{b.id} (noul={noul:.2f})")
+                else:
+                    kept.append(b)
+                    log.append(f"{phase} backstop: kept #{b.id} (noul={noul:.2f})")
+            return [b for b in doomed if b not in kept]
+        except RuntimeError as e:
+            log.append(f"{phase} batched backstop error: {e}")
+            return doomed  # on error, evict as planned
 
     def _drop(self, doomed: List[Block]) -> None:
         self._archive(doomed)   # evict from live window, keep a copy on disk
@@ -221,7 +336,17 @@ class MemoryHarness:
         Side effects: eviction may run, files are mirrored, ``self.events`` grows.
         """
         self.turn += 1
-        self.add("user", user_text)
+
+        # Pre-classify user request using SystemOne before sending to LLM
+        tag = TRANSIENT
+        if self.systemone:
+            try:
+                tag = self.systemone.classify_memory(user_text)
+                self.events.append(f"systemone pre-classified: {tag}")
+            except RuntimeError as e:
+                self.events.append(f"systemone pre-classify failed: {e}")
+        self.add("user", user_text, tag=tag)
+
         self.evict()                                  # room BEFORE generating
         raw = self.llm.chat(self.serialize_messages())
         if TAG_RE.search(raw) and self.cfg.classify_mode in ("inline", "both"):
