@@ -6,6 +6,7 @@ SystemOneClient wraps the System One Lite decision API (http://127.0.0.1:8010)
 for typed questions -- used for memory classification and eviction backstops."""
 from __future__ import annotations
 import json
+import os
 import re
 from typing import Any, Dict, List, Optional
 from .blocks import LONG, SHORT, TRANSIENT
@@ -74,17 +75,37 @@ class StubChat:
         return json.dumps({"labels": labels})
 
 
+#: Both the llama.cpp SystemOne fork and the Featherless classifier service
+#: answer this endpoint family; ``/v1/classifier`` is the canonical hosted
+#: path (also served as /v1/systemone and /v1/decisions), while local fork
+#: builds only expose /v1/systemone. We try them in that order and cache.
+SYSTEMONE_PATHS = ("/v1/systemone", "/v1/classifier")
+
+#: Both APIs reject bodies without a non-empty ``model`` field, so the client
+#: always sends one; override via --systemone-model / the studio settings.
+DEFAULT_SYSTEMONE_MODEL = "systemone"
+
+
 class SystemOneClient:
     """HTTP client for the System One Lite decision API.
 
     Sends typed questions (choice, score, noul) and returns calibrated
     answers. Used for memory classification and eviction backstops.
 
+    Works against both the local llama.cpp SystemOne fork and the hosted
+    Featherless classifier endpoint. The request body always carries a
+    ``model`` field (required by both servers), plus optional bearer auth.
+
     Default base URL is http://127.0.0.1:8010 (local System One Lite server).
     """
 
-    def __init__(self, base_url: str = "http://127.0.0.1:8010"):
+    def __init__(self, base_url: str = "http://127.0.0.1:8010",
+                 model: str = "", api_key: str = ""):
         self.base_url = base_url.rstrip("/")
+        self.model = model or DEFAULT_SYSTEMONE_MODEL
+        self.api_key = api_key or os.environ.get("FEATHERLESS_API_KEY", "")
+        # cached endpoint path that worked (see SYSTEMONE_PATHS)
+        self._path: Optional[str] = None
 
     def system_one(self, state: Any, questions: Dict[str, Any]) -> Dict[str, Any]:
         """Evaluate a state against typed questions.
@@ -101,18 +122,40 @@ class SystemOneClient:
         import urllib.request
         import urllib.error
 
-        body = json.dumps({"state": state, "questions": questions}).encode()
-        req = urllib.request.Request(
-            f"{self.base_url}/v1/systemone",
-            data=body,
-            headers={"Content-Type": "application/json"},
-            method="POST",
-        )
-        try:
-            with urllib.request.urlopen(req, timeout=30) as resp:
-                return json.loads(resp.read().decode())
-        except urllib.error.URLError as e:
-            raise RuntimeError(f"SystemOne API error: {e}") from e
+        paths = ([self._path] if self._path else []) + [
+            p for p in SYSTEMONE_PATHS if p != self._path]
+        last_exc: Optional[Exception] = None
+        for path in paths:
+            body = json.dumps(
+                {"model": self.model, "state": state,
+                 "questions": questions}).encode()
+            headers = {"Content-Type": "application/json"}
+            if self.api_key:
+                headers["Authorization"] = f"Bearer {self.api_key}"
+            req = urllib.request.Request(
+                f"{self.base_url}{path}", data=body,
+                headers=headers, method="POST")
+            try:
+                with urllib.request.urlopen(req, timeout=60) as resp:
+                    out = json.loads(resp.read().decode())
+                    self._path = path          # sticky: skip probing next time
+                    return out
+            except urllib.error.HTTPError as e:
+                # 404/405 means this server does not expose that route -- try
+                # the alias before giving up; anything else is a real failure.
+                if e.code in (404, 405):
+                    last_exc = e
+                    continue
+                detail = ""
+                try:
+                    detail = e.read().decode(errors="replace")[:400]
+                except Exception:
+                    pass
+                raise RuntimeError(
+                    f"SystemOne API error {e.code} at {path}: {detail}") from e
+            except urllib.error.URLError as e:
+                last_exc = e
+        raise RuntimeError(f"SystemOne API error: {last_exc}")
 
     def classify_memory(self, text: str) -> str:
         """Classify a conversation block's memory duration.

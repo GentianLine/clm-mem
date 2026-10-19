@@ -183,9 +183,13 @@ class SystemOneHandler(_Silent):
         else:
             self.send_json({"error": "not found", "path": path}, 404)
 
+    # the decision endpoint is served under both names so clients can probe
+    # either alias (matches the llama.cpp fork + Featherless behaviour)
+    SYSTEMONE_PATHS = ("/v1/systemone", "/v1/classifier")
+
     def do_POST(self):
         path = self.path.split("?")[0]
-        if path != "/v1/systemone":
+        if path not in self.SYSTEMONE_PATHS:
             self.send_json({"error": "not found", "path": path}, 404)
             return
         from .llm import MockSystemOne     # lazy

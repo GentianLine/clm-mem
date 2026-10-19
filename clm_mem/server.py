@@ -67,12 +67,16 @@ def normalize_root(url: str) -> str:
 class ProxyConfig:
     backend_root: Optional[str] = None      # e.g. http://127.0.0.1:8081
     systemone_root: Optional[str] = None    # e.g. http://127.0.0.1:8010
+    systemone_model: str = ""               # model id sent to the decision API
+    systemone_api_key: str = ""             # bearer for hosted decision APIs
     served_model: str = "clm-mem-model"
     harness_kwargs: dict = field(default_factory=dict)
     chat_temperature: float = 0.6
     chat_max_tokens: int = 1024
     request_timeout: float = 300.0
     ui_enabled: bool = True                 # serve the bundled web studio at /
+    backend_ctx: Optional[int] = None       # live llama.cpp window (from /props)
+    systemone_alias: str = ""               # cached decision endpoint path
 
 
 class ProxyHandler(BaseHTTPRequestHandler):
@@ -132,7 +136,10 @@ class ProxyHandler(BaseHTTPRequestHandler):
         self.end_headers()
 
     def _forward(self, method: str, url: str, body: bytes | None = None,
-                 stream: bool = False):
+                 stream: bool = False, probe: bool = False):
+        """Proxy one request to a backend. With ``probe=True`` the response is
+        buffered and NOT sent to the client; True means "this alias exists"
+        (any HTTP status other than 404/405), False means try another path."""
         req = urllib.request.Request(
             url, data=body if method.upper() != "GET" else None,
             headers={"Content-Type": "application/json"})
@@ -140,12 +147,26 @@ class ProxyHandler(BaseHTTPRequestHandler):
             resp = urllib.request.urlopen(req,
                                           timeout=self.supervisor.config.request_timeout)
         except urllib.error.HTTPError as e:
+            if probe and e.code in (404, 405):
+                return False
             self._respond_payload(e.code, e.read(),
                                   e.headers.get("Content-Type", "application/json"))
-            return
+            return True
         except Exception as exc:       # backend down / connection refused
+            if probe:
+                return False
             self.send_error_json(502, f"backend unreachable at {url}: {exc}")
-            return
+            return True
+        if probe:
+            payload = resp.read()
+            status = getattr(resp, "status", 200) or 200
+            ok = status not in (404, 405)
+            if ok:
+                self._respond_payload(status, payload,
+                                      resp.headers.get("Content-Type",
+                                                       "application/json"))
+            resp.close()
+            return ok
         ctype = resp.headers.get("Content-Type", "")
         if stream and ctype.startswith("text/event-stream"):
             self._start_sse()
@@ -322,14 +343,25 @@ class ProxyHandler(BaseHTTPRequestHandler):
             return self._chat_completions()
         if path in ("/mcp", "/v1/mcp"):
             return self._mcp()
-        if path == "/v1/systemone":
+        if path in ("/v1/systemone", "/v1/classifier", "/v1/decisions"):
             target = cfg.systemone_root or cfg.backend_root
             if not target:
                 self.send_error_json(503, "systemone is not configured")
                 return
             body = self.read_body_bytes()
-            self._forward("POST", f"{target}{path}", body)
-            return
+            # the decision server may only expose one of its aliases (the
+            # llama.cpp fork serves /v1/systemone, Featherless both); probe
+            # each path and relay the first response that is not a 404/405.
+            aliases = [cfg.systemone_alias] if cfg.systemone_alias else []
+            aliases += [p for p in ("/v1/systemone", "/v1/classifier",
+                                    "/v1/decisions")
+                        if p not in aliases and p != path]
+            aliases.insert(aliases.index(path) if path in aliases else 0, path)
+            for alias in aliases:
+                if self._forward("POST", f"{target}{alias}", body, probe=True):
+                    cfg.systemone_alias = alias      # sticky for later calls
+                    return
+            self.send_error_json(503, "no decision endpoint answered")
         if path.startswith("/v1/clm/"):
             return self._clm_post(path)
         if path in NATIVE_POST_PATHS and cfg.backend_root:
@@ -586,7 +618,9 @@ class Supervisor:
         systemone = None
         if cfg.systemone_root:
             from .llm import SystemOneClient
-            systemone = SystemOneClient(cfg.systemone_root)
+            systemone = SystemOneClient(cfg.systemone_root,
+                                       model=cfg.systemone_model,
+                                       api_key=cfg.systemone_api_key)
         h = MemoryHarness(llm, HarnessConfig(**kwargs), systemone=systemone)
         with self.lock:
             existing = self.sessions.get(sid)      # another thread raced us
@@ -700,6 +734,7 @@ def start_supervisor(*, public_host: str = "127.0.0.1", public_port: int = 0,
                      systemone_mode: str = "mock", systemone_cmd=None,
                      systemone_flags=("--host", "{host}", "--port", "{port}"),
                      systemone_url: Optional[str] = None,
+                     systemone_model: str = "", systemone_api_key: str = "",
                      harness_kwargs: Optional[dict] = None,
                      chat_temperature: float = 0.6, chat_max_tokens: int = 1024,
                      log_dir: Optional[str] = None, timeout: float = 90.0,
@@ -762,6 +797,7 @@ def start_supervisor(*, public_host: str = "127.0.0.1", public_port: int = 0,
 
     config = ProxyConfig(
         backend_root=backend_root, systemone_root=systemone_root,
+        systemone_model=systemone_model, systemone_api_key=systemone_api_key,
         served_model=served_model,
         harness_kwargs=dict(harness_kwargs or {}),
         chat_temperature=chat_temperature, chat_max_tokens=chat_max_tokens,

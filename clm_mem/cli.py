@@ -112,6 +112,14 @@ def _add_common(sub: argparse.ArgumentParser) -> None:
                      help="System One Lite API URL for typed decisions "
                           "(pre-classification + eviction backstop). "
                           "Set to 'none' to disable.")
+    sub.add_argument("--systemone-model", default="",
+                     help="model id sent to the decision API (required; both "
+                          "the llama.cpp fork and Featherless reject bodies "
+                          "without it). e.g. featherless-ai/"
+                          "Qwen3.6-35B-A3B-classifier")
+    sub.add_argument("--systemone-api-key", default="",
+                     help="bearer token for the decision API (defaults to "
+                          "$FEATHERLESS_API_KEY)")
     sub.add_argument("--connect", default="",
                      help="attach to a running `clm-mem serve` at this base "
                           "URL (e.g. http://127.0.0.1:8080/v1) instead of "
@@ -166,22 +174,27 @@ def cmd_chat(a: argparse.Namespace) -> None:
     llm = OpenAIChat(base_url=a.base_url, model=a.model, api_key=a.api_key,
                      temperature=a.temperature, max_tokens=a.max_tokens)
 
-    # Wire up SystemOne for typed decisions if configured
+    # Wire up SystemOne for typed decisions if configured. The probe goes
+    # through the same client (and therefore the same endpoint aliases and
+    # required "model" field) the harness will use later -- a raw urllib ping
+    # with no model always fails against both the fork and Featherless.
     systemone = None
     if a.systemone_url and a.systemone_url.lower() != "none":
+        systemone = SystemOneClient(a.systemone_url,
+                                    model=a.systemone_model,
+                                    api_key=getattr(a, "systemone_api_key", ""))
         try:
-            import urllib.request
-            req = urllib.request.Request(a.systemone_url + "/v1/systemone",
-                                         data=b'{"state":"test","questions":{"q":{"type":"noul","instructions":"test"}}}',
-                                         headers={"Content-Type": "application/json"},
-                                         method="POST")
-            with urllib.request.urlopen(req, timeout=5) as resp:
-                resp.read()
-            systemone = SystemOneClient(a.systemone_url)
-            print(f"SystemOne decision API: {a.systemone_url} (OK)")
+            probe = systemone.system_one(
+                "test",
+                {"q": {"type": "noul", "instructions": "is this a test?"}})
+            if "answers" not in probe:
+                raise RuntimeError(f"unexpected reply: {probe}")
+            print(f"SystemOne decision API: {a.systemone_url} (OK, "
+                  f"model={systemone.model}, endpoint={systemone._path})")
         except Exception as e:
             print(f"WARNING: SystemOne API unreachable at {a.systemone_url}: {e}")
             print("         Pre-classification and eviction backstop will be skipped.")
+            systemone = None
 
     h = MemoryHarness(llm, _cfg(a), systemone=systemone)
     print(f"clm-mem | {h.status()}\nbackend: {a.base_url} -> {a.model}")
@@ -236,7 +249,15 @@ def _add_serve_flags(sub: argparse.ArgumentParser) -> None:
     sub.add_argument("--systemone-binary", dest="systemone_bin", default="",
                      help="SystemOne fork/server binary to spawn behind the proxy")
     sub.add_argument("--systemone-url", default="",
-                     help="URL of an already-running System One API")
+                     help="URL of an already-running System One API "
+                          "(local fork or https://api.featherless.ai)")
+    sub.add_argument("--systemone-model", default="",
+                     help="model id sent to the decision API; required by both "
+                          "the llama.cpp fork and Featherless (default: a bare "
+                          "name the fork accepts, set the real id for hosted)")
+    sub.add_argument("--systemone-api-key", default="",
+                     help="bearer token for the decision API (defaults to "
+                          "$FEATHERLESS_API_KEY)")
     sub.add_argument("--systemone-passthrough", action="store_true",
                      help="the backend itself answers /v1/systemone "
                           "(SystemOne fork build)")
@@ -296,6 +317,8 @@ def cmd_serve(a: argparse.Namespace) -> None:
         systemone_mode=sys_mode,
         systemone_cmd=sys_cmd if sys_mode == "spawn" else None,
         systemone_url=a.systemone_url or None,
+        systemone_model=getattr(a, "systemone_model", ""),
+        systemone_api_key=getattr(a, "systemone_api_key", ""),
         harness_kwargs=harness_kwargs,
         chat_temperature=a.temperature, chat_max_tokens=a.max_tokens,
         log_dir=a.log_dir or None, ui=a.ui)

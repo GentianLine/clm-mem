@@ -187,17 +187,101 @@ def test_unknown_session_status_404(sup):
     assert st == 404
 
 # -- systemone proxy -------------------------------------------------------------
+SYS_Q = {"duration": {
+    "type": "choice",
+    "instructions": "tag this block",
+    "criteria": {"longterm": "durable", "shortterm": "working",
+                 "transient": "chatter"}}}
+
+
 def test_systemone_proxied_through_public_port(sup):
     st, resp = http_call(
         sup, "/v1/systemone", "POST",
-        {"state": {"text": "Remember: password hunter2"},
-         "questions": {"duration": {
-             "type": "choice",
-             "instructions": "tag this block",
-             "criteria": {"longterm": "durable", "shortterm": "working",
-                          "transient": "chatter"}}}})
+        {"model": "sys-one",
+         "state": {"text": "Remember: password hunter2"},
+         "questions": SYS_Q})
     assert st == 200
     assert resp["answers"]["duration"]["choice"] == "longterm"
+
+
+def test_classifier_alias_proxied(sup):
+    """/v1/classifier (Featherless spelling) is proxied to the decision server."""
+    st, resp = http_call(
+        sup, "/v1/classifier", "POST",
+        {"model": "sys-one", "state": "Remember: password hunter2",
+         "questions": SYS_Q})
+    assert st == 200
+    assert resp["answers"]["duration"]["choice"] == "longterm"
+
+
+def test_systemone_client_sends_model_and_probes_aliases():
+    """Regression: the client must send the required 'model' field and fall
+    back across endpoint aliases (/v1/systemone <-> /v1/classifier)."""
+    from clm_mem.llm import SystemOneClient
+    from clm_mem.processes import ProcessManager, free_port
+
+    mgr = ProcessManager()
+    try:
+        port = free_port()
+        # the mock serves both aliases; point at a path-only server below
+        h = mgr.start("s1", mgr.mock_argv("systemone"), port=port, timeout=30)
+        c = SystemOneClient(h.root_url, model="featherless-ai/Test-classifier")
+        out = c.system_one(
+            "Remember: codename Nova",
+            {"duration": {"type": "choice", "instructions": "tag",
+                          "criteria": {"longterm": "l", "shortterm": "s",
+                                       "transient": "t"}}})
+        assert out["answers"]["duration"]["choice"] == "longterm"
+        assert c.model == "featherless-ai/Test-classifier"
+
+        # a base URL whose first alias 404s must still land on the second
+        import threading
+        from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
+        import json as _json
+
+        class Handler(BaseHTTPRequestHandler):
+            def _send(self, status, obj):
+                raw = _json.dumps(obj).encode()
+                self.send_response(status)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(raw)))
+                self.end_headers()
+                self.wfile.write(raw)
+
+            def do_POST(self):
+                n = int(self.headers.get("Content-Length") or 0)
+                body = _json.loads(self.rfile.read(n).decode())
+                if not body.get("model"):        # mirrors both real APIs
+                    self._send(422, {"error": "model required"})
+                    return
+                if self.path == "/v1/systemone":
+                    self._send(404, {"error": "no such route"})
+                    return
+                self._send(200, {"answers": {"q": {
+                    "type": "choice", "choice": "longterm",
+                    "confidence": 1.0}}})
+
+            def log_message(self, *a): pass
+        with ThreadingHTTPServer(("127.0.0.1", 0), Handler) as only:
+            port2 = only.server_port
+            t = threading.Thread(target=only.serve_forever, daemon=True)
+            t.start()
+            c2 = SystemOneClient(f"http://127.0.0.1:{port2}", model="m")
+            out = c2.system_one("x", {"q": {"type": "choice",
+                                           "instructions": "t",
+                                           "criteria": {"a": None,
+                                                        "b": None}}})
+            assert out["answers"]["q"]["choice"] == "longterm"
+            assert c2._path == "/v1/classifier", "should stick to the alias that works"
+            # second call skips probing and goes straight to the cached path
+            out = c2.system_one("y", {"q": {"type": "choice",
+                                           "instructions": "t",
+                                           "criteria": {"a": None,
+                                                        "b": None}}})
+            assert out["answers"]["q"]["choice"] == "longterm"
+            only.shutdown()          # inside the with: stop serve_forever
+    finally:
+        mgr.shutdown()
 
 # -- process lifecycle -------------------------------------------------------------
 def test_supervisor_spawns_and_kills_processes(tmp_path):
