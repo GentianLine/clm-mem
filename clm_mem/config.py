@@ -4,11 +4,14 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+#: Fallback live-window budget when no backend context window can be found.
+DEFAULT_CTX_BUDGET = 8192
+
 
 @dataclass
 class HarnessConfig:
     # --- budget ---------------------------------------------------------
-    max_context_tokens: int = 8192      # live-window token budget
+    max_context_tokens: int = DEFAULT_CTX_BUDGET   # live-window token budget
 
     # --- eviction policy --------------------------------------------------
     shortterm_keep_pct: float = 0.5     # fraction of shortterm KEPT per FIFO round

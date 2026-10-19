@@ -56,11 +56,54 @@ MIME_TYPES = {
 
 
 def normalize_root(url: str) -> str:
-    """http://host:8080/v1/ -> http://host:8080 (root, not OpenAI base)."""
+    """http://host:8000/v1/ -> http://host:8000 (root, not OpenAI base)."""
     url = url.rstrip("/")
     if url.endswith("/v1"):
         url = url[: -3].rstrip("/")
     return url
+
+
+def discover_backend_ctx(root_url: str, timeout: float = 5.0) -> Optional[int]:
+    """Read the live context window of a llama.cpp-style backend.
+
+    Checks ``/props`` (llama.cpp puts it under
+    ``default_generation_settings.n_ctx``; older builds and the bundled mock
+    use top-level ``n_ctx``), then ``/v1/models`` model metadata. Returns
+    None when nothing answers -- external servers need not expose these.
+    """
+    import urllib.request
+    urls = (f"{root_url}/props", f"{root_url}/v1/props")
+    for url in urls:
+        try:
+            with urllib.request.urlopen(url, timeout=timeout) as r:
+                props = json.loads(r.read().decode())
+        except Exception:
+            continue
+        if not isinstance(props, dict):
+            continue
+        cand = (props.get("default_generation_settings") or {}).\
+            get("n_ctx") or props.get("n_ctx") or props.get("n_ctx_train")
+        try:
+            cand = int(cand)
+        except (TypeError, ValueError):
+            cand = 0
+        if cand > 1:
+            return cand
+    try:
+        with urllib.request.urlopen(f"{root_url}/v1/models",
+                                    timeout=timeout) as r:
+            data = json.loads(r.read().decode()).get("data", [])
+        for m in data:
+            cand = (m.get("meta") or {}).get("n_ctx")
+            try:
+                cand = int(cand)
+            except (TypeError, ValueError):
+                continue
+            if cand > 1:
+                return cand
+    except Exception:
+        pass
+    return None
 
 
 @dataclass
@@ -279,6 +322,7 @@ class ProxyHandler(BaseHTTPRequestHandler):
                             "model": cfg.served_model,
                             "sessions": sids, "processes": backends,
                             "ui": cfg.ui_enabled,
+                            "backend_ctx": cfg.backend_ctx,
                             "workspace_root": sup.workspace_root})
         elif path in ("/mcp", "/v1/mcp"):
             self.send_json({"server": "clm-mem", "version": VERSION,
@@ -407,6 +451,8 @@ class ProxyHandler(BaseHTTPRequestHandler):
             full = qd.get("full", ["0"])[0].lower() in ("1", "true", "yes")
             snap = h.snapshot(include_full=full)
             snap["session_id"] = sid
+            # the llama.cpp window the budget is bounded by (if known)
+            snap["backend_ctx"] = sup.config.backend_ctx
             return self.send_json(snap)
         if action == "archive":
             if h is None:
@@ -477,6 +523,7 @@ class ProxyHandler(BaseHTTPRequestHandler):
                 h.cfg.shortterm_keep_pct = pct
                 changed["shortterm_keep_pct"] = pct
             budget = body.get("max_context_tokens")
+            note = None
             if budget is not None:
                 try:
                     budget = int(budget)
@@ -484,8 +531,20 @@ class ProxyHandler(BaseHTTPRequestHandler):
                 except (TypeError, ValueError, AssertionError):
                     return self.send_error_json(
                         400, "max_context_tokens must be an int >= 64")
+                # lockstep: llama.cpp fixes its window at load time, so the
+                # harness budget can only ever follow it, never exceed it.
+                bctx = sup.config.backend_ctx
+                if bctx and budget > bctx:
+                    note = (f"budget clamped to backend ctx {bctx} "
+                            f"(llama.cpp window is fixed at load)")
+                    budget = bctx
                 h.cfg.max_context_tokens = budget
                 changed["max_context_tokens"] = budget
+            if note:
+                return self.send_json({"session_id": sid,
+                                       "changed": changed, "note": note,
+                                       "backend_ctx": sup.config.backend_ctx,
+                                       "status": h.status()})
             thr = body.get("systemone_evict_threshold")
             if thr is not None:
                 try:
@@ -807,9 +866,23 @@ def start_supervisor(*, public_host: str = "127.0.0.1", public_port: int = 0,
     else:
         raise ValueError(f"unknown systemone_mode {systemone_mode!r}")
 
+    # context-window lockstep: the llama.cpp window is fixed at load time, so
+    # the harness budget follows it instead of drifting. Unless the caller
+    # pinned max_context_tokens explicitly, the budget becomes the backend's
+    # own ctx size (discovered from /props). ``None``/0 in harness_kwargs means
+    # "follow the backend".
+    backend_ctx: Optional[int] = None
+    if backend_root:
+        backend_ctx = discover_backend_ctx(backend_root, timeout=5.0)
+    harness_kwargs = dict(harness_kwargs or {})
+    if not harness_kwargs.get("max_context_tokens"):
+        harness_kwargs["max_context_tokens"] = (
+            backend_ctx or HarnessConfig().max_context_tokens)
+
     config = ProxyConfig(
         backend_root=backend_root, systemone_root=systemone_root,
         systemone_model=systemone_model, systemone_api_key=systemone_api_key,
+        backend_ctx=backend_ctx,
         served_model=served_model,
         harness_kwargs=dict(harness_kwargs or {}),
         chat_temperature=chat_temperature, chat_max_tokens=chat_max_tokens,

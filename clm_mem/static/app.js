@@ -324,13 +324,27 @@ function renderEvents() {
 function primeTuning(snap) {
   $("keepSlider").value = Math.round((snap.shortterm_keep_pct || 0.5) * 100);
   $("keepOut").textContent = Math.round((snap.shortterm_keep_pct || 0.5) * 100) + "%";
-  $("budgetInput").value = snap.budget;
+  const inp = $("budgetInput");
+  inp.value = snap.budget;
+  // the llama.cpp window is fixed when the backend loads; the harness budget
+  // follows it and can never exceed it, so cap the control at that value.
+  const bctx = snap.backend_ctx || null;
+  inp.max = bctx || "";
+  $("ctxOut").textContent = bctx
+    ? `llama.cpp window: ${bctx} (budget follows)` : `backend window: n/a`;
 }
 async function applySetting(body) {
   if (!state.ws) return;
   try {
-    await req("POST", `/v1/clm/sessions/${encodeURIComponent(sid())}/settings`, body);
+    const d = await req("POST", `/v1/clm/sessions/${encodeURIComponent(sid())}/settings`, body);
+    if (d && d.note) { toast(d.note, true); primeTuningSnapshotBudget(d); }
+    return d;
   } catch (e) { toast(e.message, true); }
+}
+function primeTuningSnapshotBudget(d) {
+  // reflect a server-side clamp immediately (budget -> backend ctx)
+  const v = d.changed && d.changed.max_context_tokens;
+  if (v !== undefined) $("budgetInput").value = v;
 }
 
 /* ---------- wiring ---------- */

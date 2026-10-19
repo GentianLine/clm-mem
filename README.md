@@ -124,7 +124,25 @@ clm-mem serve --port 8080 --llama-server ./build/bin/llama-server \
 # already-running server + separate SystemOne API:
 clm-mem serve --backend-url http://localhost:8000/v1 \
     --systemone-url http://localhost:8010
+
+# pass the *entire* backend command line, options included (no flag guessing):
+clm-mem serve --port 8080 \
+    --backend-cmd "./build/bin/llama-server -m models/qwen.gguf --n-gpu-layers 99 --ctx-size 16384" \
+    --systemone-cmd "./build/bin/server-decision -m systemone.gguf"
+
+# hosted Featherless decision API instead of a local SystemOne server:
+clm-mem serve --backend-url http://localhost:8000/v1 \
+    --systemone-url https://api.featherless.ai \
+    --systemone-model featherless-ai/Qwen3.6-35B-A3B-classifier
+    # auth via $FEATHERLESS_API_KEY or --systemone-api-key
 ```
+
+When `--backend-cmd` (or `--systemone-cmd`) contains `{host}` / `{port}`
+placeholders they are expanded in place; otherwise the server is launched with
+`--host <ip> --port <port>` appended. The harness budget follows the backend:
+if `--max-context-tokens` is not given, `serve` discovers the live llama.cpp
+context window (`/props -> default_generation_settings.n_ctx`) and sets the
+clm-mem budget to exactly that value, so the two windows never drift apart.
 
 `serve` prints a machine-readable READY line (JSON) once everything is up, including the web-studio and MCP endpoints:
 

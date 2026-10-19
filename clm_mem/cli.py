@@ -5,7 +5,7 @@ import sys
 import textwrap
 from typing import List, Optional
 from .blocks import LONG, SHORT
-from .config import HarnessConfig
+from .config import DEFAULT_CTX_BUDGET, HarnessConfig
 from .harness import MemoryHarness
 from .llm import OpenAIChat, StubChat, SystemOneClient
 
@@ -82,8 +82,11 @@ def _add_harness_flags(sub: argparse.ArgumentParser) -> None:
     sub.add_argument("--temperature", type=float, default=0.6)
     sub.add_argument("--max-tokens", type=int, default=1024,
                      help="generation cap per reply")
-    sub.add_argument("--max-context-tokens", type=int, default=8192,
-                     help="live-window token budget for the harness")
+    sub.add_argument("--max-context-tokens", type=int, default=None,
+                     help="live-window token budget for the harness; when "
+                          "unset it follows the backend's own context window "
+                          "(read from /props) so llama.cpp and clm-mem never "
+                          "drift apart")
     sub.add_argument("--shortterm-keep-pct", type=float, default=0.5,
                      help="fraction of shortterm KEPT per FIFO eviction round "
                           "(changeable mid-session with /keep <pct>)")
@@ -139,7 +142,7 @@ def _cfg(a: argparse.Namespace,
     thr = a.evict_threshold if a.evict_threshold is not None else (
         0.55 if getattr(a, "use_mock", False) else 0.7)
     return HarnessConfig(
-        max_context_tokens=a.max_context_tokens,
+        max_context_tokens=a.max_context_tokens or DEFAULT_CTX_BUDGET,
         shortterm_keep_pct=a.shortterm_keep_pct,
         keep_recent_turns=a.keep_recent_turns,
         classify_mode=a.classify_mode,
@@ -170,6 +173,16 @@ def cmd_chat(a: argparse.Namespace) -> None:
         print(status)
         chat_loop(h)
         return
+
+    if a.max_context_tokens is None:
+        # follow the served window: llama.cpp fixes its context at load time,
+        # so mirror it instead of letting the two budgets drift.
+        from .server import discover_backend_ctx, normalize_root
+        ctx = discover_backend_ctx(normalize_root(a.base_url))
+        a.max_context_tokens = ctx or DEFAULT_CTX_BUDGET
+        print(f"context window: {a.max_context_tokens} tokens "
+              f"(from backend)" if ctx else
+              f"context window: {a.max_context_tokens} tokens (default)")
 
     llm = OpenAIChat(base_url=a.base_url, model=a.model, api_key=a.api_key,
                      temperature=a.temperature, max_tokens=a.max_tokens)
@@ -291,6 +304,9 @@ def cmd_serve(a: argparse.Namespace) -> None:
     from .server import start_supervisor
 
     harness_kwargs = _dc.asdict(_cfg(a, ""))
+    if a.max_context_tokens is None:
+        # not pinned on the CLI -> supervisor sets it from the backend's ctx
+        harness_kwargs["max_context_tokens"] = None
 
     if a.use_mock:
         backend_mode = "mock"
@@ -350,6 +366,8 @@ def cmd_serve(a: argparse.Namespace) -> None:
              "root_url": sup.base_url, "model": a.served_model,
              "backend": sup.config.backend_root,
              "systemone": sup.config.systemone_root,
+             "backend_ctx": sup.config.backend_ctx,
+             "budget": sup.config.harness_kwargs.get("max_context_tokens"),
              "ui_url": sup.ui_url, "mcp_url": f"{sup.base_url}/mcp"
              if sup.ui_url else None,
              "processes": procs}
@@ -357,6 +375,9 @@ def cmd_serve(a: argparse.Namespace) -> None:
         print(f"clm-mem serve | llama.cpp-compatible drop-in at {sup.public_base}")
         print(f"  advertised model : {a.served_model}")
         print(f"  chat backend     : {sup.config.backend_root or '(none)'}")
+        print(f"  context budget   : "
+              f"{sup.config.harness_kwargs.get('max_context_tokens')} tokens "
+              f"(llama.cpp window: {sup.config.backend_ctx or 'unknown'})")
         print(f"  systemone api    : {sup.config.systemone_root or '(none)'}")
         if sup.ui_url:
             print(f"  web studio       : {sup.ui_url}  (MCP tools: {sup.base_url}/mcp)")

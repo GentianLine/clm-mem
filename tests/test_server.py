@@ -357,6 +357,53 @@ def test_spawn_full_command_with_placeholders(tmp_path):
         s.shutdown()
 
 
+# -- context-window lockstep -----------------------------------------------------
+def test_budget_follows_backend_ctx(tmp_path):
+    """With no pinned budget, the harness adopts the backend's ctx size."""
+    s = start_supervisor(public_port=0, served_model="mock-model",
+                         backend_mode="mock", systemone_mode="none",
+                         harness_kwargs={"workdir": str(tmp_path)},
+                         timeout=30)
+    try:
+        assert s.config.backend_ctx == 4096          # mock /props n_ctx
+        st, health = http_call(s, "/health")
+        assert health["backend_ctx"] == 4096
+        http_call(s, "/v1/chat/completions", "POST",
+                  {"model": "mock-model",
+                   "messages": [{"role": "user", "content": "hi there"}]},
+                  {"X-Cllm-Mem-Session": "ctx1"})
+        st, snap = http_call(s, "/v1/clm/sessions/ctx1/snapshot")
+        assert snap["budget"] == 4096
+        assert snap["backend_ctx"] == 4096
+    finally:
+        s.shutdown()
+
+
+def test_settings_budget_clamped_to_backend_ctx(tmp_path):
+    """The UI may shrink the budget, but never past the fixed llama.cpp window."""
+    s = start_supervisor(public_port=0, served_model="mock-model",
+                         backend_mode="mock", systemone_mode="none",
+                         harness_kwargs={"workdir": str(tmp_path)},
+                         timeout=30)
+    try:
+        http_call(s, "/v1/chat/completions", "POST",
+                  {"model": "mock-model",
+                   "messages": [{"role": "user", "content": "hi there"}]},
+                  {"X-Cllm-Mem-Session": "ctx2"})
+        st, d = http_call(s, "/v1/clm/sessions/ctx2/settings", "POST",
+                          {"max_context_tokens": 8192})
+        assert st == 200
+        assert d["changed"]["max_context_tokens"] == 4096
+        assert "clamped" in d["note"]
+        # shrinking is fine and sticks
+        st, d = http_call(s, "/v1/clm/sessions/ctx2/settings", "POST",
+                          {"max_context_tokens": 2048})
+        assert d["changed"]["max_context_tokens"] == 2048
+        assert "note" not in d
+    finally:
+        s.shutdown()
+
+
 def test_backend_none_mode_errors_cleanly(tmp_path):
     s = start_supervisor(public_port=0, backend_mode="none",
                          systemone_mode="none", timeout=30,
