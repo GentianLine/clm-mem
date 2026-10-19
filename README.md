@@ -186,7 +186,8 @@ Studio API (same-origin, JSON):
 GET    /v1/clm/workspaces                    list projects + live stats
 POST   /v1/clm/workspaces        {name}     create a sandbox
 DELETE /v1/clm/workspaces/<name>            delete it (files included)
-GET    /v1/clm/sessions                    GET  /v1/clm/sessions/<id>/snapshot[?full=1]
+GET    /v1/clm/sessions                    list live session ids
+GET    /v1/clm/sessions/<id>/snapshot[?full=1]   full context view
 GET    /v1/clm/sessions/<id>/archive?q=…   search the eviction archive
 POST   /v1/clm/sessions/<id>/reinject {block_id}
 POST   /v1/clm/sessions/<id>/settings {shortterm_keep_pct, max_context_tokens,
