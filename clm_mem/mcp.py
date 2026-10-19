@@ -11,10 +11,12 @@ from __future__ import annotations
 import json
 from typing import Any, Dict, List, Optional
 
+from .server import VERSION as SERVER_VERSION
+
 PROTOCOL_VERSION = "2025-06-18"
 SERVER_INFO = {"name": "clm-mem",
                "title": "clm-mem memory harness",
-               "version": "0.2.0"}
+               "version": SERVER_VERSION}
 
 _WS_DEFAULT = "default"
 

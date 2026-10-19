@@ -1,6 +1,6 @@
 [project]
 name = "clm-mem"
-version = "0.2.0"
+version = "0.3.0"
 description = "Zero-training long/short-term memory harness for open chat models (Qwen etc.), inspired by Context Language Models (arXiv:2609.37725)"
 readme = "README.md"
 license = { text = "MIT" }

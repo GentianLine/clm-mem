@@ -35,7 +35,7 @@ from .harness import MemoryHarness
 from .llm import OpenAIChat
 from .processes import ProcessManager, free_port, render_flags
 
-VERSION = "0.2.0"
+VERSION = "0.3.0"
 SESSION_HEADER = "X-Cllm-Mem-Session"
 NATIVE_GET_PATHS = ("/props", "/metrics", "/specs")
 NATIVE_POST_PATHS = ("/completion", "/embedding")
