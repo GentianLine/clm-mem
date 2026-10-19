@@ -7,3 +7,6 @@ __pycache__/
 context.md
 context.jsonl
 archive.jsonl
+
+# local smoke-test scratch
+smoke/
