@@ -1,0 +1,18 @@
+clm-mem serve | llama.cpp-compatible drop-in at http://127.0.0.1:8123/v1
+  advertised model : mock-model
+  chat backend     : http://127.0.0.1:33545
+  systemone api    : http://127.0.0.1:55391
+  memory sessions  : send header X-Cllm-Mem-Session: <id> on chat requests
+{"ready": true, "base_url": "http://127.0.0.1:8123/v1", "root_url": "http://127.0.0.1:8123", "model": "mock-model", "backend": "http://127.0.0.1:33545", "systemone": "http://127.0.0.1:55391", "processes": {"backend-mock": "127.0.0.1:33545", "systemone-mock": "127.0.0.1:55391"}}
+clm-mem serve | llama.cpp-compatible drop-in at http://127.0.0.1:8123/v1
+  advertised model : mock-model
+  chat backend     : http://127.0.0.1:46769
+  systemone api    : http://127.0.0.1:55645
+  memory sessions  : send header X-Cllm-Mem-Session: <id> on chat requests
+{"ready": true, "base_url": "http://127.0.0.1:8123/v1", "root_url": "http://127.0.0.1:8123", "model": "mock-model", "backend": "http://127.0.0.1:46769", "systemone": "http://127.0.0.1:55645", "processes": {"backend-mock": "127.0.0.1:46769", "systemone-mock": "127.0.0.1:55645"}}
+clm-mem serve | llama.cpp-compatible drop-in at http://127.0.0.1:8124/v1
+  advertised model : mock-model
+  chat backend     : http://127.0.0.1:57299
+  systemone api    : http://127.0.0.1:42123
+  memory sessions  : send header X-Cllm-Mem-Session: <id> on chat requests
+{"ready": true, "base_url": "http://127.0.0.1:8124/v1", "root_url": "http://127.0.0.1:8124", "model": "mock-model", "backend": "http://127.0.0.1:57299", "systemone": "http://127.0.0.1:42123", "processes": {"backend-mock": "127.0.0.1:57299", "systemone-mock": "127.0.0.1:42123"}}
