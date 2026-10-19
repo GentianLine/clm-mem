@@ -141,10 +141,17 @@ class SystemOneClient:
                     self._path = path          # sticky: skip probing next time
                     return out
             except urllib.error.HTTPError as e:
-                # 404/405 means this server does not expose that route -- try
-                # the alias before giving up; anything else is a real failure.
+                # 404/405 usually means this server does not expose that route
+                # -- try the alias before giving up. (Featherless also uses
+                # 404 for "model not enabled for /classifier", so keep the
+                # error body around; it ends up in the final message.)
                 if e.code in (404, 405):
-                    last_exc = e
+                    try:
+                        detail = e.read().decode(errors="replace")[:400]
+                    except Exception:
+                        detail = ""
+                    last_exc = RuntimeError(
+                        f"SystemOne API {e.code} at {path}: {detail}")
                     continue
                 detail = ""
                 try:
@@ -155,7 +162,7 @@ class SystemOneClient:
                     f"SystemOne API error {e.code} at {path}: {detail}") from e
             except urllib.error.URLError as e:
                 last_exc = e
-        raise RuntimeError(f"SystemOne API error: {last_exc}")
+        raise RuntimeError(f"SystemOne API error: {last_exc}") from last_exc
 
     def classify_memory(self, text: str) -> str:
         """Classify a conversation block's memory duration.
