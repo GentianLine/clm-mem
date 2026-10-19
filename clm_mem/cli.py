@@ -94,9 +94,11 @@ def _add_harness_flags(sub: argparse.ArgumentParser) -> None:
                      help="HF tokenizer id for exact token counts (optional)")
     sub.add_argument("--workdir", default=".",
                      help="where context.md / context.jsonl / archive.jsonl live")
-    sub.add_argument("--evict-threshold", type=float, default=0.7,
+    sub.add_argument("--evict-threshold", type=float, default=None,
                      help="SystemOne noul confidence needed to approve eviction "
-                          "(higher = more conservative, keep more memory)")
+                          "(higher = more conservative, keep more memory). "
+                          "Default 0.7, or 0.55 under --use-mock so the "
+                          "bundled mock decisions visibly evict")
 
 
 def _add_common(sub: argparse.ArgumentParser) -> None:
@@ -126,6 +128,8 @@ def _cfg(a: argparse.Namespace,
          fallback_model: Optional[str] = None) -> HarnessConfig:
     fb = fallback_model if fallback_model is not None \
         else getattr(a, "model", "")
+    thr = a.evict_threshold if a.evict_threshold is not None else (
+        0.55 if getattr(a, "use_mock", False) else 0.7)
     return HarnessConfig(
         max_context_tokens=a.max_context_tokens,
         shortterm_keep_pct=a.shortterm_keep_pct,
@@ -133,7 +137,7 @@ def _cfg(a: argparse.Namespace,
         classify_mode=a.classify_mode,
         workdir=a.workdir,
         tokenizer_name=a.tokenizer or fb,
-        systemone_evict_threshold=a.evict_threshold,
+        systemone_evict_threshold=thr,
     )
 
 
@@ -186,6 +190,7 @@ def cmd_chat(a: argparse.Namespace) -> None:
 
 def cmd_demo(a: argparse.Namespace) -> None:
     """Offline simulation with StubChat -- exercises all three eviction phases."""
+    a.use_mock = True                    # mock-aware default evict threshold
     cfg = _cfg(a)
     cfg.max_context_tokens = min(cfg.max_context_tokens, 2048)
 
