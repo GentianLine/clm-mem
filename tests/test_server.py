@@ -336,6 +336,27 @@ def test_spawn_requires_command():
         start_supervisor(public_port=0, backend_mode="spawn", timeout=5)
 
 
+def test_spawn_full_command_with_placeholders(tmp_path):
+    """A spawn command may carry {host}/{port} itself (full-command style);
+    then the default --host/--port flags are NOT appended a second time."""
+    import sys
+    s = start_supervisor(
+        public_port=0, served_model="mock-model",
+        backend_mode="spawn", systemone_mode="none",
+        backend_cmd=[sys.executable, "-m", "clm_mem.mock_backends",
+                     "--kind", "llm", "--host", "{host}", "--port", "{port}"],
+        backend_flags=None,
+        harness_kwargs={"workdir": str(tmp_path)}, timeout=30)
+    try:
+        st, resp = http_call(s, "/v1/chat/completions", "POST",
+                             {"model": "mock-model",
+                              "messages": [{"role": "user",
+                                            "content": "full cmd hello"}]})
+        assert st == 200 and resp["choices"][0]["message"]["content"]
+    finally:
+        s.shutdown()
+
+
 def test_backend_none_mode_errors_cleanly(tmp_path):
     s = start_supervisor(public_port=0, backend_mode="none",
                          systemone_mode="none", timeout=30,

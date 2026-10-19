@@ -238,16 +238,29 @@ def _add_serve_flags(sub: argparse.ArgumentParser) -> None:
                      help="run the bundled mock backend + mock SystemOne "
                           "(no GPU, no binaries needed)")
     sub.add_argument("--llama-server", dest="llama_server_bin", default="",
-                     help="llama-server binary to spawn behind the proxy")
+                     help="llama-server binary to spawn behind the proxy "
+                          "(simple form: just the path; see --backend-cmd for "
+                          "passing the full command with options)")
     sub.add_argument("--model-file", dest="model_path", default="",
                      help="GGUF/weights path passed to llama-server --model")
     sub.add_argument("--ctx-size", type=int, default=0,
                      help="context size passed to llama-server (optional)")
+    sub.add_argument("--backend-cmd", default="",
+                     help="complete backend command line including all options, "
+                          "e.g. \"llama-server -m qwen.gguf --n-gpu-layers 99 "
+                          "--ctx-size 16384\". Use {host} / {port} placeholders "
+                          "if the server needs them spelled your way; otherwise "
+                          "--host/--port are appended. Replaces "
+                          "--llama-server/--model-file/--ctx-size when given.")
     sub.add_argument("--backend-url", default="",
                      help="root (or /v1) URL of an already-running server "
                           "to proxy instead of spawning one")
     sub.add_argument("--systemone-binary", dest="systemone_bin", default="",
                      help="SystemOne fork/server binary to spawn behind the proxy")
+    sub.add_argument("--systemone-cmd", default="",
+                     help="complete SystemOne server command line including all "
+                          "options (placeholders {host}/{port} supported); "
+                          "replaces --systemone-binary when given.")
     sub.add_argument("--systemone-url", default="",
                      help="URL of an already-running System One API "
                           "(local fork or https://api.featherless.ai)")
@@ -283,14 +296,19 @@ def cmd_serve(a: argparse.Namespace) -> None:
         backend_mode = "mock"
     elif a.backend_url:
         backend_mode = "external"
-    elif a.llama_server_bin:
+    elif a.llama_server_bin or getattr(a, "backend_cmd", ""):
         backend_mode = "spawn"
     else:
         sys.exit("error: pick a backend: --use-mock, --backend-url URL, "
-                 "or --llama-server PATH")
+                 "--llama-server PATH or --backend-cmd 'FULL COMMAND'")
 
     backend_cmd = None
-    if backend_mode == "spawn":
+    if getattr(a, "backend_cmd", ""):
+        # full command line including options, passed through verbatim
+        import shlex
+        backend_mode = "spawn"
+        backend_cmd = shlex.split(a.backend_cmd)
+    elif backend_mode == "spawn":
         backend_cmd = [a.llama_server_bin]
         if a.model_path:
             backend_cmd += ["--model", a.model_path]
@@ -300,6 +318,9 @@ def cmd_serve(a: argparse.Namespace) -> None:
     sys_cmd = None
     if a.systemone_passthrough:
         sys_mode = "passthrough"
+    elif getattr(a, "systemone_cmd", ""):
+        import shlex
+        sys_mode, sys_cmd = "spawn", shlex.split(a.systemone_cmd)
     elif a.use_mock:
         sys_mode = "mock"
     elif a.systemone_bin:

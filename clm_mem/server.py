@@ -752,8 +752,20 @@ def start_supervisor(*, public_host: str = "127.0.0.1", public_port: int = 0,
     host = "127.0.0.1"                      # internal backends stay loopback
 
     def spawn(kind: str, cmd, flags):
+        """Start one backend from a command line.
+
+        ``cmd`` may already carry the ``{host}`` / ``{port}`` placeholders
+        wherever the server wants them (full-command style invocation); only
+        when it does not are ``flags`` appended at the end. This lets callers
+        pass an entire llama-server/decision-server command including every
+        option, instead of a bare binary plus fixed flag names.
+        """
         port = free_port(host)
-        argv = list(cmd) + render_flags(flags, host, port)
+        argv = list(cmd)
+        if any("{host}" in a or "{port}" in a for a in argv):
+            argv = render_flags(argv, host, port)
+        else:
+            argv = render_flags(list(argv) + list(flags or ()), host, port)
         h = manager.start(kind, argv, host=host, port=port,
                           ready_paths=("/health", "/v1/models"),
                           timeout=timeout)
