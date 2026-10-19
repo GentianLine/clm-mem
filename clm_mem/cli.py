@@ -1,4 +1,4 @@
-"""Command-line interface: `clm-mem chat` and `clm-mem demo`."""
+"""Command-line interface: clm-mem chat / demo / serve."""
 from __future__ import annotations
 import argparse
 import sys
@@ -43,7 +43,7 @@ def chat_loop(h: MemoryHarness) -> None:
             from .blocks import TRANSIENT
             want = {"/long": LONG, "/short": SHORT,
                     "/transient": TRANSIENT}[text.split()[0]]
-            hits = [b for b in h.blocks if b.tag == want]
+            hits = h.live_blocks(want)
             for b in hits:
                 print(f"  #{b.id} t{b.turn}: "
                       f"{textwrap.shorten(b.content, 120)}")
@@ -110,6 +110,16 @@ def _add_common(sub: argparse.ArgumentParser) -> None:
                      help="System One Lite API URL for typed decisions "
                           "(pre-classification + eviction backstop). "
                           "Set to 'none' to disable.")
+    sub.add_argument("--connect", default="",
+                     help="attach to a running `clm-mem serve` at this base "
+                          "URL (e.g. http://127.0.0.1:8080/v1) instead of "
+                          "talking to a backend directly")
+    sub.add_argument("--workspace", default="",
+                     help="workspace/project for --connect sessions "
+                          "(session becomes ws:<name>)")
+    sub.add_argument("--session", default="",
+                     help="explicit session id for --connect "
+                          "(overrides ws:<workspace> naming)")
 
 
 def _cfg(a: argparse.Namespace,
@@ -128,6 +138,27 @@ def _cfg(a: argparse.Namespace,
 
 
 def cmd_chat(a: argparse.Namespace) -> None:
+    if getattr(a, "connect", ""):
+        # Attach this prompt to a running `clm-mem serve` (same library the
+        # web studio uses; sessions are shared via X-Cllm-Mem-Session).
+        from .remote import connect as open_remote
+        h = open_remote(a.connect,
+                        session=getattr(a, "session", "") or None,
+                        workspace=getattr(a, "workspace", "") or None)
+        try:
+            status = h.status()
+        except Exception as exc:
+            sys.exit(f"error: cannot attach to {a.connect}: {exc}")
+        ui = h.ui_url()
+        h.prime()
+        print(f"clm-mem | attached to serve @ {a.connect} "
+              f"(session {h.session})")
+        if ui:
+            print(f"web studio: {ui}")
+        print(status)
+        chat_loop(h)
+        return
+
     llm = OpenAIChat(base_url=a.base_url, model=a.model, api_key=a.api_key,
                      temperature=a.temperature, max_tokens=a.max_tokens)
 
@@ -208,6 +239,8 @@ def _add_serve_flags(sub: argparse.ArgumentParser) -> None:
                      help="where backend process logs go (default: tmpdir)")
     sub.add_argument("--json", action="store_true",
                      help="print only the machine-readable READY line")
+    sub.add_argument("--no-ui", dest="ui", action="store_false",
+                     help="do not host the bundled web studio at the root URL")
     _add_harness_flags(sub)
 
 
@@ -260,7 +293,7 @@ def cmd_serve(a: argparse.Namespace) -> None:
         systemone_url=a.systemone_url or None,
         harness_kwargs=harness_kwargs,
         chat_temperature=a.temperature, chat_max_tokens=a.max_tokens,
-        log_dir=a.log_dir or None)
+        log_dir=a.log_dir or None, ui=a.ui)
 
     procs = {h.name: f"{h.host}:{h.port}"
              for h in sup.manager.handles if h.alive()}
@@ -268,12 +301,16 @@ def cmd_serve(a: argparse.Namespace) -> None:
              "root_url": sup.base_url, "model": a.served_model,
              "backend": sup.config.backend_root,
              "systemone": sup.config.systemone_root,
+             "ui_url": sup.ui_url, "mcp_url": f"{sup.base_url}/mcp"
+             if sup.ui_url else None,
              "processes": procs}
     if not a.json:
         print(f"clm-mem serve | llama.cpp-compatible drop-in at {sup.public_base}")
         print(f"  advertised model : {a.served_model}")
         print(f"  chat backend     : {sup.config.backend_root or '(none)'}")
         print(f"  systemone api    : {sup.config.systemone_root or '(none)'}")
+        if sup.ui_url:
+            print(f"  web studio       : {sup.ui_url}  (MCP tools: {sup.base_url}/mcp)")
         print("  memory sessions  : send header "
               f"X-Cllm-Mem-Session: <id> on chat requests")
     print(_json.dumps(ready), flush=True)

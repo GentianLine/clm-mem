@@ -19,3 +19,9 @@ dev = ["pytest>=8"]
 
 [project.scripts]
 clm-mem = "clm_mem.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["clm_mem*"]
+
+[tool.setuptools.package-data]
+clm_mem = ["static/*"]

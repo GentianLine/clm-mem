@@ -1,0 +1,105 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>clm-mem studio</title>
+<link rel="icon" type="image/svg+xml" href="/favicon.svg">
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<header>
+  <div class="brand">
+    <svg class="logo" viewBox="0 0 24 24"><path d="M12 3a9 9 0 1 0 9 9h-3a6 6 0 1 1-6-6V3z"/><path d="M12 8a4 4 0 1 0 4 4h-2a2 2 0 1 1-2-2V8z"/></svg>
+    <span class="name">clm-mem <em>studio</em></span>
+  </div>
+  <div class="status-pills" id="pills"></div>
+  <div class="spacer"></div>
+  <button id="refreshBtn" class="ghost" title="Refresh (f5)">⟳</button>
+</header>
+
+<main>
+  <aside id="sidebar">
+    <div class="side-head">
+      <span>Projects</span>
+      <button id="wsAddBtn" class="ghost tiny" title="New project">＋</button>
+    </div>
+    <form id="wsAddForm" hidden>
+      <input id="wsAddInput" placeholder="project-name" autocomplete="off">
+      <div class="row"><button type="submit" class="ok">create</button>
+      <button type="button" class="cancel">cancel</button></div>
+    </form>
+    <ul id="wsList"></ul>
+    <div class="side-foot">
+      <div class="kv"><span>session</span><code id="sidLabel">—</code></div>
+      <div class="kv"><span>mcp</span><code id="mcpLabel">—</code></div>
+      <button id="newChatBtn" class="ghost">✦ New chat</button>
+    </div>
+  </aside>
+
+  <section id="chatPane">
+    <div id="messages"></div>
+    <form id="composer">
+      <div class="comp-row">
+        <textarea id="input" rows="1" placeholder="Message — Enter to send, Shift+Enter for newline"></textarea>
+        <button id="sendBtn" type="submit">Send</button>
+      </div>
+      <div class="comp-meta">
+        <span id="statusLine">ready</span>
+        <label class="hint-toggle"><input type="checkbox" id="hintsOn" checked> context hints</label>
+      </div>
+    </form>
+  </section>
+
+  <aside id="inspector">
+    <nav id="tabs">
+      <button data-tab="context" class="on">Context</button>
+      <button data-tab="archive">Archive</button>
+      <button data-tab="events">Events</button>
+      <button data-tab="tuning">Tuning</button>
+    </nav>
+
+    <div id="tab-context" class="tab">
+      <div class="budget">
+        <div class="bar"><i id="budgetFill"></i></div>
+        <div class="budget-text"><span id="budgetNums">0 / 0</span>
+          <span class="counts">
+            <b class="c-long" id="cLong">0</b><b class="c-short" id="cShort">0</b><b class="c-trans" id="cTrans">0</b>
+          </span></div>
+      </div>
+      <div class="filter" id="tagFilter">
+        <button data-tag="" class="on">all</button>
+        <button data-tag="longterm">long</button>
+        <button data-tag="shortterm">short</button>
+        <button data-tag="transient">transient</button>
+      </div>
+      <ul id="blockList"></ul>
+    </div>
+
+    <div id="tab-archive" class="tab" hidden>
+      <form id="searchForm"><input id="searchInput" placeholder="search evicted memory…" autocomplete="off"></form>
+      <ul id="archiveList"><li class="empty">Type to search the archive.</li></ul>
+    </div>
+
+    <div id="tab-events" class="tab" hidden>
+      <ul id="eventList"><li class="empty">No context events yet.</li></ul>
+    </div>
+
+    <div id="tab-tuning" class="tab" hidden>
+      <label class="tune">shortterm keep per FIFO round
+        <input type="range" id="keepSlider" min="0" max="95" step="5" value="50">
+        <output id="keepOut">50%</output></label>
+      <label class="tune">context budget (tokens)
+        <input type="number" id="budgetInput" min="64" step="64" value="8192"></label>
+      <label class="tune">evict threshold (SystemOne noul)
+        <input type="range" id="thrSlider" min="0" max="100" step="5" value="70">
+        <output id="thrOut">0.70</output></label>
+      <p class="note">Changes apply live to the selected project's session.</p>
+    </div>
+  </aside>
+</main>
+
+<div id="toast"></div>
+<script src="/app.js"></script>
+</body>
+</html>
