@@ -44,6 +44,7 @@ def chat_loop(h: MemoryHarness) -> None:
             want = {"/long": LONG, "/short": SHORT,
                     "/transient": TRANSIENT}[text.split()[0]]
             hits = h.live_blocks(want)
+
             for b in hits:
                 print(f"  #{b.id} t{b.turn}: "
                       f"{textwrap.shorten(b.content, 120)}")

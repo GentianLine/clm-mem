@@ -24,7 +24,6 @@ class HarnessConfig:
     classifier_max_tokens: int = 200    # generation cap for the router pass;
                                        # keeps a slow local backend from
                                        # rambling on the JSON label list
-
     # --- SystemOne decision API --------------------------------------------
     systemone_evict_threshold: float = 0.7  # noul confidence needed to evict
 
