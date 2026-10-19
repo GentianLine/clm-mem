@@ -60,16 +60,14 @@ async function loadHealth() {
 
 /* ---------- workspaces (projects) ---------- */
 async function loadWorkspaces(selectFirst = false) {
-  const d = await req("GET", "/v1/clm/workspaces");
+  let d = await req("GET", "/v1/clm/workspaces");
+  if (selectFirst && !d.workspaces.length) {
+    await req("POST", "/v1/clm/workspaces", { name: "default" });
+    d = await req("GET", "/v1/clm/workspaces");
+  }
   renderWorkspaces(d.workspaces);
-  if (selectFirst) {
-    if (!d.workspaces.length) {
-      await req("POST", "/v1/clm/workspaces", { name: "default" });
-      const d2 = await req("GET", "/v1/clm/workspaces");
-      renderWorkspaces(d2.workspaces);
-    }
-    const first = d2 ? d2.workspaces[0] : d.workspaces[0];
-    if (first) selectWorkspace(first.name, false);
+  if (selectFirst && d.workspaces.length) {
+    selectWorkspace(d.workspaces[0].name, true);
   }
 }
 function renderWorkspaces(list) {
@@ -113,8 +111,8 @@ async function selectWorkspace(name, refreshPanels = true) {
     const snap = await req("GET", `/v1/clm/sessions/${encodeURIComponent(sid())}/snapshot`);
     restoreTranscript(snap);
     if (refreshPanels) { paintContext(snap); primeTuning(snap); }
-    // seed event timeline without showing chips for pre-existing events
-    for (const ev of snap.events || []) rememberEvent(ev, false);
+    // seed the events timeline from server history (chips stay chat-side only)
+    for (const ev of (snap.events || []).slice().reverse()) rememberEvent(ev, true);
   } catch (e) {
     // no session yet — fine, first message will create it
     addSystem(`project "${esc(name)}" ready — memory budget will apply from your serve settings`);

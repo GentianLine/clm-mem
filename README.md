@@ -126,11 +126,12 @@ clm-mem serve --backend-url http://localhost:8000/v1 \
     --systemone-url http://localhost:8010
 ```
 
-`serve` prints a machine-readable READY line (JSON) once everything is up:
+`serve` prints a machine-readable READY line (JSON) once everything is up, including the web-studio and MCP endpoints:
 
 ```json
 {"ready": true, "base_url": "http://127.0.0.1:8080/v1", "root_url": "http://127.0.0.1:8080",
  "model": "mock-model", "backend": "http://127.0.0.1:...", "systemone": "http://127.0.0.1:...",
+ "ui_url": "http://127.0.0.1:8080", "mcp_url": "http://127.0.0.1:8080/mcp",
  "processes": {"backend-mock": "...", "systemone-mock": "..."}}
 ```
 
@@ -151,7 +152,68 @@ Supported surface (llama.cpp + OpenAI union): `/v1/chat/completions` (incl.
 SSE streaming), `/v1/models`, `/v1/systemone`, native `/completion`,
 `/props`, `/metrics`, `/version`, `/health`, CORS preflight, plus clm-mem
 introspection routes `/v1/clm/sessions`, `/v1/clm/sessions/<id>/status`,
-`.../reset`, and `DELETE /v1/clm/sessions/<id>`.
+`.../reset`, and `DELETE /v1/clm/sessions/<id>` — and the full studio API
+below.
+
+## Web studio + workspaces + MCP
+
+By default `serve` also hosts a single-page web studio at its root URL
+(`http://127.0.0.1:8080/`; disable with `--no-ui`). It is built for people
+juggling several projects:
+
+* **Projects sidebar** — each workspace is an isolated sandbox (its own
+  `context.md` / `archive.jsonl` under `<workdir>/workspaces/<name>`), with a
+  live token meter and per-tier block dots. Create/delete from the UI or via
+  `POST`/`DELETE /v1/clm/workspaces`.
+* **Chat with context hints, not raw dumps** — long-term / short-term /
+  transient appear as colored badges on your messages, eviction phases fire
+  as compact chips under a reply (`🧹 phase2 · FIFO-evicted …`, `🛡 backstop ·
+  kept #4`), and the context panel shows collapsed previews + token counts
+  instead of full text ("show full block" fetches one block on demand).
+* **Archive search** — type in the Archive tab to substring-search evicted
+  memory; one click re-injects any hit back into the live window.
+* **Tuning tab** — `shortterm_keep_pct`, budget and SystemOne threshold are
+  changed live per project (`POST .../settings`).
+* **Events timeline** — every classifier decision and eviction phase, with
+  its kind badge and sequence number.
+
+Session ids drive the studio: anything named `ws:<project>` gets that
+project's sandbox; plain ids still behave like classic single sessions.
+
+Studio API (same-origin, JSON):
+
+```
+GET    /v1/clm/workspaces                    list projects + live stats
+POST   /v1/clm/workspaces        {name}     create a sandbox
+DELETE /v1/clm/workspaces/<name>            delete it (files included)
+GET    /v1/clm/sessions                    GET  /v1/clm/sessions/<id>/snapshot[?full=1]
+GET    /v1/clm/sessions/<id>/archive?q=…   search the eviction archive
+POST   /v1/clm/sessions/<id>/reinject {block_id}
+POST   /v1/clm/sessions/<id>/settings {shortterm_keep_pct, max_context_tokens,
+                                          systemone_evict_threshold}
+```
+
+**MCP toolbox.** `serve` is also an MCP server (streamable HTTP JSON-RPC at
+`/mcp`): `initialize`, `tools/list`, `tools/call` with tools `clm_chat`,
+`clm_status`, `clm_blocks`, `clm_recall`, `clm_reinject`,
+`clm_set_keep_pct`, `clm_workspaces`. Point any MCP client at the URL and it
+gets the identical per-workspace memory — same library, same harnesses, no
+extra process.
+
+## Attach a CLI chat to a running server
+
+`chat` and `serve` are two ends of the same stick — attach the prompt to a
+running server (web studio stays usable meanwhile):
+
+```bash
+clm-mem serve --use-mock --port 8080                     # or with real backends
+clm-mem chat --connect http://127.0.0.1:8080/v1 --workspace myproj
+```
+
+All in-session commands (`/status`, `/long`, `/recall`, `/reinject`, `/keep`)
+then talk to the server's REST API — the same ones the studio's UI buttons
+call — and `RemoteHarness` (in the library) mirrors live config knobs:
+setting `h.cfg.shortterm_keep_pct = 0.8` pushes it to the running session.
 
 ## Run the chat harness
 

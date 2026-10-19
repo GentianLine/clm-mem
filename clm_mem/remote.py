@@ -112,7 +112,10 @@ class RemoteHarness:
                          + ("?full=1" if full else ""))
 
     def status(self) -> str:
-        s = self.snapshot()
+        try:
+            s = self.snapshot()
+        except Exception:
+            return "turn=0 blocks=0 (new session -- send a message to create it)"
         n = s["counts"]
         return (f"turn={s['turn']} tokens={s['tokens']}/{s['budget']} "
                 f"blocks={len(s['blocks'])} (long={n['longterm']} "

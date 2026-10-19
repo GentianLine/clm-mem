@@ -15,6 +15,7 @@ from .blocks import LONG, SHORT, TRANSIENT, VALID_TAGS, Block
 from .config import HarnessConfig
 from .harness import MemoryHarness
 from .llm import OpenAIChat, StubChat
+from .remote import RemoteHarness
 from .server import ProxyConfig, Supervisor, start_supervisor
 from .tagging import split_tagged
 from .tokens import TokenCounter
@@ -22,7 +23,7 @@ from .tokens import TokenCounter
 __version__ = "0.2.0"
 __all__ = [
     "Block", "HarnessConfig", "MemoryHarness", "OpenAIChat", "StubChat",
-    "ProxyConfig", "Supervisor", "start_supervisor",
+    "ProxyConfig", "Supervisor", "start_supervisor", "RemoteHarness",
     "TokenCounter", "split_tagged",
     "LONG", "SHORT", "TRANSIENT", "VALID_TAGS", "__version__",
 ]
