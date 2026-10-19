@@ -353,9 +353,12 @@ document.addEventListener("DOMContentLoaded", () => {
 
   // workspace add
   $("wsAddBtn").onclick = () => {
-    const f = $("wsAddForm"); f.hidden = !f.hidden; $("wsAddInput").focus();
+    const f = $("wsAddForm");
+    f.hidden = !f.hidden;
+    $("wsAddInput").focus();
   };
-  $("wsAddForm .cancel").onclick = () => ($("wsAddForm").hidden = true);
+  document.querySelector("#wsAddForm .cancel").onclick =
+    () => { $("wsAddForm").hidden = true; };
   $("wsAddForm").addEventListener("submit", async (e) => {
     e.preventDefault();
     const name = $("wsAddInput").value.trim();
