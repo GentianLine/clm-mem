@@ -147,7 +147,11 @@ def _add_common(sub: argparse.ArgumentParser) -> None:
     sub.add_argument("--base-url", default="http://localhost:8000/v1",
                      help="OpenAI-compatible endpoint (vLLM/Ollama/...)")
     sub.add_argument("--model", default="Qwen/Qwen3-8B-Instruct")
-    sub.add_argument("--api-key", default="EMPTY")
+    sub.add_argument("--api-key", "--backend-api-key",
+                     help="bearer token for the chat backend's API (any "
+                          "OpenAI-compatible server; local llama.cpp/vLLM/"
+                          "Ollama do not check it, hosted services like "
+                          "Featherless or OpenRouter require one)")
     _add_harness_flags(sub)
     sub.add_argument("--systemone-url", default="http://127.0.0.1:8010",
                      help="System One Lite API URL for typed decisions "
@@ -220,7 +224,8 @@ def cmd_chat(a: argparse.Namespace) -> None:
         # follow the served window: llama.cpp fixes its context at load time,
         # so mirror it instead of letting the two budgets drift.
         from .server import discover_backend_ctx, normalize_root
-        ctx = discover_backend_ctx(normalize_root(a.base_url))
+        ctx = discover_backend_ctx(normalize_root(a.base_url),
+                                    api_key=a.api_key)
         a.max_context_tokens = ctx or DEFAULT_CTX_BUDGET
         print(f"context window: {a.max_context_tokens} tokens "
               f"(from backend)" if ctx else
@@ -310,6 +315,13 @@ def _add_serve_flags(sub: argparse.ArgumentParser) -> None:
     sub.add_argument("--backend-url", default="",
                      help="root (or /v1) URL of an already-running server "
                           "to proxy instead of spawning one")
+    sub.add_argument("--backend-api-key", default="",
+                     help="bearer token sent to the chat backend on every LLM "
+                          "call it fronts (needed for hosted OpenAI-compatible "
+                          "backends, e.g. --backend-url https://api.featherless.ai "
+                          "--backend-api-key KEY). Local servers ignore it; "
+                          "when unset the proxy relays any Authorization "
+                          "header clients send")
     sub.add_argument("--systemone-binary", dest="systemone_bin", default="",
                      help="SystemOne fork/server binary to spawn behind the proxy")
     sub.add_argument("--systemone-cmd", default="",
@@ -393,6 +405,7 @@ def cmd_serve(a: argparse.Namespace) -> None:
         served_model=a.served_model,
         backend_mode=backend_mode, backend_cmd=backend_cmd,
         backend_url=a.backend_url or None,
+        backend_api_key=a.backend_api_key,
         systemone_mode=sys_mode,
         systemone_cmd=sys_cmd if sys_mode == "spawn" else None,
         systemone_url=a.systemone_url or None,

@@ -63,19 +63,24 @@ def normalize_root(url: str) -> str:
     return url
 
 
-def discover_backend_ctx(root_url: str, timeout: float = 5.0) -> Optional[int]:
+def discover_backend_ctx(root_url: str, timeout: float = 5.0,
+                         api_key: str = "") -> Optional[int]:
     """Read the live context window of a llama.cpp-style backend.
 
     Checks ``/props`` (llama.cpp puts it under
     ``default_generation_settings.n_ctx``; older builds and the bundled mock
     use top-level ``n_ctx``), then ``/v1/models`` model metadata. Returns
     None when nothing answers -- external servers need not expose these.
+    ``api_key``, when set, is sent as a bearer token (hosted backends often
+    require one even on discovery routes like /props and /v1/models).
     """
     import urllib.request
+    auth = {"Authorization": f"Bearer {api_key}"} if api_key else {}
     urls = (f"{root_url}/props", f"{root_url}/v1/props")
     for url in urls:
         try:
-            with urllib.request.urlopen(url, timeout=timeout) as r:
+            req = urllib.request.Request(url, headers=dict(auth))
+            with urllib.request.urlopen(req, timeout=timeout) as r:
                 props = json.loads(r.read().decode())
         except Exception:
             continue
@@ -90,8 +95,9 @@ def discover_backend_ctx(root_url: str, timeout: float = 5.0) -> Optional[int]:
         if cand > 1:
             return cand
     try:
-        with urllib.request.urlopen(f"{root_url}/v1/models",
-                                    timeout=timeout) as r:
+        req = urllib.request.Request(f"{root_url}/v1/models",
+                                     headers=dict(auth))
+        with urllib.request.urlopen(req, timeout=timeout) as r:
             data = json.loads(r.read().decode()).get("data", [])
         for m in data:
             cand = (m.get("meta") or {}).get("n_ctx")
@@ -109,6 +115,7 @@ def discover_backend_ctx(root_url: str, timeout: float = 5.0) -> Optional[int]:
 @dataclass
 class ProxyConfig:
     backend_root: Optional[str] = None      # e.g. http://127.0.0.1:8081
+    backend_api_key: str = ""               # bearer for hosted chat backends
     systemone_root: Optional[str] = None    # e.g. http://127.0.0.1:8010
     systemone_model: str = ""               # model id sent to the decision API
     systemone_api_key: str = ""             # bearer for hosted decision APIs
@@ -178,14 +185,37 @@ class ProxyHandler(BaseHTTPRequestHandler):
         self.send_header("Cache-Control", "no-cache")
         self.end_headers()
 
+    def _auth_header(self, api_key: Optional[str] = None) -> Dict[str, str]:
+        """Bearer header for backend-bound requests.
+
+        ``api_key=None`` uses the configured chat-backend key
+        (--backend-api-key); an explicit value overrides it. With no
+        credential configured on this hop, any Authorization header the
+        client itself presented is relayed instead, so clients may carry
+        their own key through the proxy. llama.cpp-style servers ignore
+        the header, so sending one is always safe."""
+        if api_key is None:
+            api_key = self.supervisor.config.backend_api_key
+        if not api_key:
+            incoming = self.headers.get("Authorization") or ""
+            return {"Authorization": incoming} if incoming else {}
+        if not api_key.lower().startswith("bearer "):
+            api_key = f"Bearer {api_key}"
+        return {"Authorization": api_key}
+
     def _forward(self, method: str, url: str, body: bytes | None = None,
-                 stream: bool = False, probe: bool = False):
+                 stream: bool = False, probe: bool = False,
+                 api_key: Optional[str] = None):
         """Proxy one request to a backend. With ``probe=True`` the response is
         buffered and NOT sent to the client; True means "this alias exists"
-        (any HTTP status other than 404/405), False means try another path."""
+        (any HTTP status other than 404/405), False means try another path.
+        ``api_key`` overrides the credential carried upstream (see
+        :meth:`_auth_header`)."""
+        headers = {"Content-Type": "application/json",
+                   **self._auth_header(api_key)}
         req = urllib.request.Request(
             url, data=body if method.upper() != "GET" else None,
-            headers={"Content-Type": "application/json"})
+            headers=headers)
         try:
             resp = urllib.request.urlopen(req,
                                           timeout=self.supervisor.config.request_timeout)
@@ -336,8 +366,10 @@ class ProxyHandler(BaseHTTPRequestHandler):
             ids = [cfg.served_model]
             if cfg.backend_root:
                 try:
-                    with urllib.request.urlopen(
-                            f"{cfg.backend_root}/v1/models", timeout=5) as r:
+                    req = urllib.request.Request(
+                        f"{cfg.backend_root}/v1/models",
+                        headers=self._auth_header())
+                    with urllib.request.urlopen(req, timeout=5) as r:
                         data = json.loads(r.read().decode()).get("data", [])
                     for m in data:
                         mid = m.get("id")
@@ -401,8 +433,17 @@ class ProxyHandler(BaseHTTPRequestHandler):
                                     "/v1/decisions")
                         if p not in aliases and p != path]
             aliases.insert(aliases.index(path) if path in aliases else 0, path)
+            # credential for the decision hop: explicit systemone key (or
+            # $FEATHERLESS_API_KEY); fall back to the backend key only when
+            # the decision server *is* the chat backend (fork passthrough),
+            # and otherwise relay whatever the client brought.
+            auth = cfg.systemone_api_key or os.environ.get(
+                "FEATHERLESS_API_KEY", "")
+            if not auth and target == cfg.backend_root:
+                auth = cfg.backend_api_key
             for alias in aliases:
-                if self._forward("POST", f"{target}{alias}", body, probe=True):
+                if self._forward("POST", f"{target}{alias}", body,
+                                 probe=True, api_key=auth):
                     cfg.systemone_alias = alias      # sticky for later calls
                     return
             self.send_error_json(503, "no decision endpoint answered")
@@ -680,15 +721,21 @@ class Supervisor:
             kwargs["workdir"] = self.ws_dir(sid[len(WS_PREFIX):])
             os.makedirs(kwargs["workdir"], exist_ok=True)
         llm = OpenAIChat(base_url=f"{cfg.backend_root}/v1",
-                         model=model or cfg.served_model, api_key="EMPTY",
+                         model=model or cfg.served_model,
+                         api_key=cfg.backend_api_key or "EMPTY",
                          temperature=cfg.chat_temperature,
                          max_tokens=cfg.chat_max_tokens)
         systemone = None
         if cfg.systemone_root:
             from .llm import SystemOneClient
+            # fork passthrough: the decision server *is* the chat backend, so
+            # a key configured for one authenticates both hops
+            syskey = cfg.systemone_api_key or (
+                cfg.backend_api_key
+                if cfg.systemone_root == cfg.backend_root else "")
             systemone = SystemOneClient(cfg.systemone_root,
-                                       model=cfg.systemone_model,
-                                       api_key=cfg.systemone_api_key)
+                                        model=cfg.systemone_model,
+                                        api_key=syskey)
         h = MemoryHarness(llm, HarnessConfig(**kwargs), systemone=systemone)
         with self.lock:
             existing = self.sessions.get(sid)      # another thread raced us
@@ -799,6 +846,7 @@ def start_supervisor(*, public_host: str = "127.0.0.1", public_port: int = 0,
                      backend_mode: str = "mock", backend_cmd=None,
                      backend_flags=("--host", "{host}", "--port", "{port}"),
                      backend_url: Optional[str] = None,
+                     backend_api_key: str = "",
                      systemone_mode: str = "mock", systemone_cmd=None,
                      systemone_flags=("--host", "{host}", "--port", "{port}"),
                      systemone_url: Optional[str] = None,
@@ -814,7 +862,9 @@ def start_supervisor(*, public_host: str = "127.0.0.1", public_port: int = 0,
     (exec ``*_cmd`` with host/port flags rendered in), ``external`` (already
     running; give its root URL) or ``none``. ``systemone_mode='passthrough'``
     means the backend itself answers ``/v1/systemone`` (SystemOne fork of
-    llama.cpp server).
+    llama.cpp server). ``backend_api_key`` is the bearer token sent to the
+    chat backend on every proxied/harness LLM call -- needed for hosted
+    OpenAI-compatible services; unset local servers ignore it.
     """
     manager = ProcessManager(log_dir=log_dir)
     host = "127.0.0.1"                      # internal backends stay loopback
@@ -882,14 +932,16 @@ def start_supervisor(*, public_host: str = "127.0.0.1", public_port: int = 0,
     # "follow the backend".
     backend_ctx: Optional[int] = None
     if backend_root:
-        backend_ctx = discover_backend_ctx(backend_root, timeout=5.0)
+        backend_ctx = discover_backend_ctx(
+            backend_root, timeout=5.0, api_key=backend_api_key)
     harness_kwargs = dict(harness_kwargs or {})
     if not harness_kwargs.get("max_context_tokens"):
         harness_kwargs["max_context_tokens"] = (
             backend_ctx or HarnessConfig().max_context_tokens)
 
     config = ProxyConfig(
-        backend_root=backend_root, systemone_root=systemone_root,
+        backend_root=backend_root, backend_api_key=backend_api_key,
+        systemone_root=systemone_root,
         systemone_model=systemone_model, systemone_api_key=systemone_api_key,
         backend_ctx=backend_ctx,
         served_model=served_model,

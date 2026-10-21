@@ -125,6 +125,14 @@ clm-mem serve --port 8080 --llama-server ./build/bin/llama-server \
 clm-mem serve --backend-url http://localhost:8000/v1 \
     --systemone-url http://localhost:8010
 
+# hosted chat backend (Featherless, OpenRouter, ...): --backend-api-key is the
+# bearer token the proxy sends on every LLM call it fronts -- including the
+# harness's own calls and context-window discovery. Local servers ignore it;
+# when unset, any Authorization header clients send is relayed instead:
+clm-mem serve --port 8080 \
+    --backend-url https://openrouter.ai/api/v1 \
+    --backend-api-key "$OPENROUTER_API_KEY"
+
 # pass the *entire* backend command line, options included (no flag guessing):
 clm-mem serve --port 8080 \
     --backend-cmd "./build/bin/llama-server -m models/qwen.gguf --n-gpu-layers 99 --ctx-size 16384" \
@@ -289,6 +297,8 @@ You should see phases fire like:
 | `--classify-mode` | both | `inline`, `post`, or `both` tagging paths |
 | `--tokenizer` | = model id | HF tokenizer for exact counts (heuristic ~4 chars/token if unavailable) |
 | `--workdir` | `.` | where `context.md`, `context.jsonl`, `archive.jsonl` live |
+| `--api-key` (`chat`/`demo`) | `EMPTY` | bearer token for the chat backend API; hosted services require one, local llama.cpp/vLLM/Ollama ignore it (`--backend-api-key` is an accepted alias) |
+| `--backend-api-key` (`serve`) | unset | bearer token the proxy sends to the chat backend on every LLM call; when unset, clients' own `Authorization` headers are relayed |
 
 ## Use as a library
 
