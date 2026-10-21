@@ -52,7 +52,8 @@ def sup(tmp_path):
 def test_ui_assets_served(sup):
     st, body = http_call(sup, "/")
     assert st == 200 and "clm-mem" in str(body)
-    for asset in ("/style.css", "/app.js", "/favicon.svg"):
+    for asset in ("/style.css", "/app.js", "/favicon.svg",
+                  "/dyson.svg", "/dyson-done.svg", "/dyson.js"):
         st, _ = http_call(sup, asset)
         assert st == 200
 
@@ -247,3 +248,61 @@ def test_remote_step_header_used(sup):
     h.step("hello there")
     st, lst = http_call(sup, "/v1/clm/sessions")
     assert "ws:hdrcheck" in lst["sessions"]
+
+
+# -- forgetting-strategy toggles (CLI flags ride the same settings route) ------
+def test_settings_forget_toggles(sup):
+    http_call(sup, "/v1/chat/completions", "POST",
+              {"messages": [{"role": "user", "content": "hi there"}]}, HDR)
+
+    st, snap = http_call(sup, "/v1/clm/sessions/ws%3Aproj/snapshot")
+    assert snap["decay_enabled"] is False and snap["supersede_enabled"] is False
+
+    st, d = http_call(sup, "/v1/clm/sessions/ws%3Aproj/settings", "POST",
+                      {"decay_enabled": True})
+    assert st == 200 and d["changed"]["decay_enabled"] is True
+
+    # stringy truthy/falsey accepted (coerced like other knobs)
+    st, d = http_call(sup, "/v1/clm/sessions/ws%3Aproj/settings", "POST",
+                      {"supersede_enabled": "on", "decay_enabled": "false"})
+    assert d["changed"]["supersede_enabled"] is True
+    assert d["changed"]["decay_enabled"] is False
+
+    st, snap = http_call(sup, "/v1/clm/sessions/ws%3Aproj/snapshot")
+    assert snap["decay_enabled"] is False and snap["supersede_enabled"] is True
+
+
+def test_mcp_set_forget_tool(sup):
+    st, lst = mcp_call(sup, {"jsonrpc": "2.0", "id": 2,
+                             "method": "tools/list"})
+    names = {t["name"] for t in lst["result"]["tools"]}
+    assert "clm_set_forget" in names
+
+    st, r = mcp_call(sup, {"jsonrpc": "2.0", "id": 7, "method": "tools/call",
+                           "params": {"name": "clm_set_forget",
+                                      "arguments": {"workspace": "fgw",
+                                                   "decay": True,
+                                                   "supersede": True}}})
+    assert st == 200 and r["result"]["isError"] is False
+
+    st, snap = http_call(sup, "/v1/clm/sessions/ws%3Afgw/snapshot")
+    assert snap["decay_enabled"] is True and snap["supersede_enabled"] is True
+
+    # omitted flags read back current state instead of changing it
+    st, r = mcp_call(sup, {"jsonrpc": "2.0", "id": 8, "method": "tools/call",
+                           "params": {"name": "clm_set_forget",
+                                      "arguments": {"workspace": "fgw"}}})
+    text = r["result"]["content"][0]["text"]
+    assert "decay_enabled=True" in text and "supersede_enabled=True" in text
+
+
+def test_remote_cfg_forget_toggles(sup):
+    """The remote attach client exposes the same toggles as local.cfg."""
+    from clm_mem.remote import RemoteHarness
+    h = RemoteHarness(f"{sup.public_base}", session="ws:remfg")
+    h.step("hello there")                      # creates the session
+    h.prime()
+    assert h.cfg.decay_enabled is False and h.cfg.supersede_enabled is False
+    h.cfg.decay_enabled = True                 # pushed via /settings
+    st, snap = http_call(sup, "/v1/clm/sessions/ws%3Aremfg/snapshot")
+    assert snap["decay_enabled"] is True

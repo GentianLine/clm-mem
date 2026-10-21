@@ -60,7 +60,12 @@ async function loadHealth() {
 
 /* ---------- workspaces (projects) ---------- */
 async function loadWorkspaces(selectFirst = false) {
-  let d = await req("GET", "/v1/clm/workspaces");
+  const ul0 = $("wsList");
+  if (ul0) ul0.classList.add("busy");
+  let d;
+  try { d = await req("GET", "/v1/clm/workspaces"); } finally {
+    setTimeout(() => { const u = $("wsList"); if (u) u.classList.remove("busy"); }, 250);
+  }
   if (selectFirst && !d.workspaces.length) {
     await req("POST", "/v1/clm/workspaces", { name: "default" });
     d = await req("GET", "/v1/clm/workspaces");
@@ -77,10 +82,12 @@ function renderWorkspaces(list) {
     const li = document.createElement("li");
     li.className = "ws-item" + (w.name === state.ws ? " active" : "");
     const pct = w.active ? Math.min(100, Math.round((100 * w.tokens) / w.budget)) : 0;
+    const frac = w.active ? Math.min(1, w.tokens / (w.budget || 1)) : 0;
     li.innerHTML = `
-      <div class="ws-name"><span>${esc(w.name)}</span>
+      <div class="ws-name"><span class="t"><span class="ws-icon"></span>${esc(w.name)}</span>
         <button class="del" title="delete project">✕</button></div>
-      <div class="ws-meter"><i style="width:${w.active ? pct : 0}%"></i></div>
+      <div class="ws-meter"><i style="width:${pct}%"
+        class="${frac === 0 ? "zero" : ""}${pct > 90 ? " over" : ""}"></i></div>
       ${w.active ? `<div class="ws-meta">
         <span><i class="dot long"></i>${w.counts.longterm}</span>
         <span><i class="dot short"></i>${w.counts.shortterm}</span>
@@ -96,6 +103,11 @@ function renderWorkspaces(list) {
         loadWorkspaces(false);
       } catch (e2) { toast(e2.message, true); }
     };
+    // per-project dyson ring: how much shell is built (fraction of budget)
+    const iconSlot = li.querySelector(".ws-icon");
+    if (window.dyson && iconSlot) {
+      iconSlot.appendChild(frac >= 1 ? dyson.done(16) : dyson.progress(16, frac));
+    }
     li.onclick = () => selectWorkspace(w.name, true);
     ul.appendChild(li);
   }
@@ -180,14 +192,19 @@ async function send() {
   addMessage("user", text, []);
   const typing = document.createElement("div");
   typing.className = "msg ai";
-  typing.innerHTML = `<div class="typing"><i></i><i></i><i></i></div>`;
+  typing.appendChild(window.dyson ? dyson.spinner(26) : Object.assign(
+    document.createElement("div"), { className: "typing", innerHTML: `<i></i><i></i><i></i>` }));
   $("messages").appendChild(typing); typing.scrollIntoView({ block: "end" });
   $("statusLine").textContent = "thinking…";
   try {
     const resp = await req("POST", "/v1/chat/completions", {
       model: (state.model || null), messages: [{ role: "user", content: text }],
     }, { "X-Cllm-Mem-Session": sid() });
-    typing.remove();
+    if (window.dyson) {   // panels fuse as the answer lands, then it fades out
+      const d = dyson.done(26); d.classList.add("flash");
+      typing.replaceChildren(d);
+      setTimeout(() => typing.remove(), 450);
+    } else typing.remove();
     const reply = resp.choices[0].message.content;
     const chips = [];
     for (const ev of (resp.clm_mem?.events || [])) {
@@ -211,8 +228,9 @@ async function send() {
   }
 }
 const evIcon = (kind) => kind.startsWith("evict") ? "🧹" : kind.startsWith("backstop") ? "🛡"
-  : kind === "classify" ? "🏷" : kind === "warn" ? "⚠️" : "·";
-const chipClass = (kind) => kind.startsWith("evict") ? "evict" : kind.startsWith("backstop") ? "guard"
+  : kind.startsWith("maintain") ? "♻️" : kind === "classify" ? "🏷" : kind === "warn" ? "⚠️" : "·";
+const chipClass = (kind) => kind.startsWith("evict") || kind.startsWith("maintain")
+  ? "evict" : kind.startsWith("backstop") ? "guard"
   : kind === "warn" ? "warn" : "classify";
 
 /* ---------- inspector: context tab ---------- */
@@ -240,6 +258,7 @@ async function paintContext() {
         <span class="b-tag">${b.tag[0]}</span>
         <span>#${b.id} · ${esc(b.role)} · turn ${b.turn}</span>
         <span>${b.tokens} tok</span>
+        ${b.importance !== undefined ? `<span class="imp${b.tag === "longterm" && b.importance < 0.45 ? " low" : ""}" title="effective importance (decays without access)">⏳ ${b.importance}</span>` : ""}
         ${b.pinned ? `<span class="pin" title="pinned (never evicted)">📌</span>` : ""}
       </div>
       <div class="b-text">${esc(b.content)}${b.truncated ? "…" : ""}</div>
@@ -260,7 +279,7 @@ function setBudget(tokens, budget, counts) {
   const pct = Math.min(100, Math.round((100 * tokens) / budget));
   const fill = $("budgetFill");
   fill.style.width = pct + "%";
-  fill.className = pct > 90 ? "over" : pct > 70 ? "warn" : "";
+  fill.className = (pct > 90 ? "over" : pct > 70 ? "warn" : "") + (pct === 0 ? " zero" : "");
   $("budgetNums").textContent = `${tokens} / ${budget} tokens`;
   $("cLong").textContent = counts.longterm;
   $("cShort").textContent = counts.shortterm;
@@ -324,6 +343,8 @@ function renderEvents() {
 function primeTuning(snap) {
   $("keepSlider").value = Math.round((snap.shortterm_keep_pct || 0.5) * 100);
   $("keepOut").textContent = Math.round((snap.shortterm_keep_pct || 0.5) * 100) + "%";
+  $("decayOn").checked = !!snap.decay_enabled;
+  $("supOn").checked = !!snap.supersede_enabled;
   const inp = $("budgetInput");
   inp.value = snap.budget;
   // the llama.cpp window is fixed when the backend loads; the harness budget
@@ -440,6 +461,15 @@ document.addEventListener("DOMContentLoaded", () => {
     await applySetting({ systemone_evict_threshold: v });
     toast(`evict threshold = ${v.toFixed(2)}`);
   });
+  $("decayOn").addEventListener("change", async (e) => {
+    await applySetting({ decay_enabled: e.target.checked });
+    toast(`decay & reheating ${e.target.checked ? "on" : "off"}`);
+    paintContext();
+  });
+  $("supOn").addEventListener("change", async (e) => {
+    await applySetting({ supersede_enabled: e.target.checked });
+    toast(`supersession ${e.target.checked ? "on" : "off"}`);
+  });
 
   // hints toggle: hide/show chips in transcript
   $("hintsOn").addEventListener("change", (e) => {
@@ -448,9 +478,17 @@ document.addEventListener("DOMContentLoaded", () => {
     });
   });
 
-  // boot
+  // boot: splash (animated dyson loader) holds until the server answers, then
+  // swaps to the "done" pose and fades away.
+  const killSplash = () => {
+    const sp = $("splash");
+    if (!sp) return;
+    const img = sp.querySelector("img");
+    if (img) { img.src = "/dyson-done.svg"; img.classList.add("flash"); }
+    setTimeout(() => sp.classList.add("gone"), 300);
+  };
   state.model = null;
-  loadHealth().then(() => loadWorkspaces(true));
+  loadHealth().then(() => { killSplash(); loadWorkspaces(true); });
   // snappy background refresh while the tab is visible
   setInterval(() => { if (!document.hidden) { paintContext(); loadWorkspaces(false); } }, 4000);
 });

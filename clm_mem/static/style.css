@@ -1,7 +1,8 @@
 /* clm-mem studio — compact dark UI for multi-project memory chat */
 :root {
   --bg: #101317; --panel: #161b22; --panel2: #1c232b; --line: #2d3540;
-  --text: #d9e1ea; --muted: #8a97a6; --accent: #58a6ff;
+  --text: #d9e1ea; --muted: #8a97a6; --accent: #7c3aed;
+  --dy-pur: #7c3aed; --dy-hi: #c084fc; --dy-gry: #9aa3ad;
   --long: #d2a75e; --short: #3fb950; --transient: #586573;
   --user-bubble: #24384f; --ai-bubble: #1c232b;
   --radius: 10px; --mono: ui-monospace, "SF Mono", Menlo, monospace;
@@ -41,12 +42,32 @@ aside, section { min-width: 0; }
 .ws-item:hover { background: var(--panel2); }
 .ws-item.active { background: var(--panel2); outline: 1px solid var(--accent); }
 .ws-name { display: flex; justify-content: space-between; align-items: center; }
+.ws-name .t { display: flex; align-items: center; gap: 5px; min-width: 0; }
+.ws-name .t > span:not(.ws-icon) { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .ws-name .del { color: var(--muted); background: none; border: none;
                 font-size: 13px; padding: 0 3px; visibility: hidden; }
 .ws-item:hover .del { visibility: visible; }
-.ws-meter { height: 4px; border-radius: 2px; background: var(--line);
-            margin-top: 6px; overflow: hidden; }
-.ws-meter i { display: block; height: 100%; background: var(--accent); }
+.ws-meter { position: relative; height: 5px; border-radius: 3px;
+            background: var(--line); margin-top: 6px; overflow: hidden; }
+.ws-meter i { display: block; position: relative; height: 100%; width: 0;
+            background: linear-gradient(90deg, #5b3aab, var(--dy-pur) 45%, var(--dy-hi));
+            transition: width .25s ease; }
+/* the star rides the leading edge of the build */
+.ws-meter i::after { content: ""; position: absolute; right: -1px; top: 50%;
+            transform: translateY(-50%); width: 7px; height: 7px; border-radius: 50%;
+            background: var(--dy-hi); box-shadow: 0 0 6px var(--dy-hi); }
+.ws-meter i.zero::after { display: none; }
+.ws-meter i.over { animation: overload 1.2s ease-in-out infinite; }
+@keyframes overload {
+  0%, 100% { filter: brightness(1); }
+  50%      { filter: brightness(1.6); box-shadow: 0 0 8px #e3b341cc; }
+}
+.ws-icon { flex: none; margin-right: 2px; vertical-align: middle; }
+#wsList.busy .ws-meter i { background-size: 250% 100%; animation: buildflow 1.4s linear infinite; }
+@keyframes buildflow {
+  from { background-position: 0% 0; }
+  to   { background-position: -250% 0; }
+}
 .ws-meta { font-size: 11px; color: var(--muted); margin-top: 4px;
           display: flex; gap: 6px; align-items: center; }
 .dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }
@@ -103,10 +124,17 @@ aside, section { min-width: 0; }
 #tabs button.on { color: var(--text); border-bottom-color: var(--accent); }
 .tab { flex: 1; overflow-y: auto; padding: 10px; }
 .budget { margin-bottom: 8px; }
-.bar { height: 8px; background: var(--line); border-radius: 4px; overflow: hidden; }
-.bar i { display: block; height: 100%; width: 0; background: var(--short);
-         transition: width .25s ease, background-color .25s; }
-.bar i.warn { background: #e3b341; } .bar i.over { background: #f85149; }
+.bar { position: relative; height: 8px; background: var(--line); border-radius: 4px;
+       overflow: hidden; }
+.bar i { display: block; position: relative; height: 100%; width: 0;
+         background: linear-gradient(90deg, #5b3aab, var(--dy-pur) 45%, var(--dy-hi));
+         transition: width .25s ease; }
+.bar i::after { content: ""; position: absolute; right: -1px; top: 50%;
+         transform: translateY(-50%); width: 8px; height: 8px; border-radius: 50%;
+         background: var(--dy-hi); box-shadow: 0 0 7px var(--dy-hi); }
+.bar i.zero::after { display: none; }
+.bar i.warn { animation: overload 1.4s ease-in-out infinite; }
+.bar i.over { animation: overload .9s ease-in-out infinite; }
 .budget-text { display: flex; justify-content: space-between; margin-top: 5px;
                font-size: 12px; color: var(--muted); }
 .counts b { font-weight: 600; padding: 0 4px; border-radius: 4px; font-size: 11px; }
@@ -156,6 +184,13 @@ aside, section { min-width: 0; }
     color: var(--text); border: 1px solid var(--line); border-radius: 6px; padding: 3px 7px; }
 .tune output { float: right; color: var(--text); font-family: var(--mono); }
 .note { font-size: 12px; color: var(--muted); }
+.tune-group { margin-top: 18px; padding-top: 10px; border-top: 1px solid var(--line);
+               font-size: 11px; letter-spacing: .06em; text-transform: uppercase;
+               color: var(--muted); }
+.tune.check { display: flex; align-items: center; gap: 8px; cursor: pointer; }
+.tune.check input { accent-color: var(--accent); margin-left: 0; }
+.block .imp { font-family: var(--mono); color: #8b949e; }
+.block .imp.low { color: #daa522; }
 
 button.ghost { background: none; border: 1px solid var(--line); color: var(--muted);
                border-radius: var(--radius); padding: 4px 8px; }
@@ -179,6 +214,22 @@ button.tiny { padding: 0 6px; font-size: 12px; border-radius: 6px; }
             animation: blink 1s infinite; }
 .typing i:nth-child(2) { animation-delay: .2s; } .typing i:nth-child(3) { animation-delay: .4s; }
 @keyframes blink { 40% { opacity: .2 } }
+
+/* dyson progress language ------------------------------------ */
+#splash { position: fixed; inset: 0; z-index: 50; background: var(--bg);
+          display: flex; flex-direction: column; gap: 14px;
+          align-items: center; justify-content: center;
+          transition: opacity .4s ease, transform .4s ease; }
+#splash.gone { opacity: 0; transform: scale(1.06); pointer-events: none; }
+.splash-name { color: var(--muted); font-size: 15px; }
+.splash-name em { color: #c084fc; font-style: normal; }
+#splash img.flash, .dyson-done.flash { animation: fuse .45s ease-out; }
+@keyframes fuse {
+  0%   { filter: brightness(2.2); transform: scale(.92); }
+  60%  { filter: brightness(1.3); }
+  100% { filter: none; transform: none; }
+}
+.msg.ai > img.dyson-spin, .msg.ai > img.dyson-done { margin: 4px 0 10px; }
 
 @media (max-width: 980px) {
   main { grid-template-columns: 170px 1fr 260px; }

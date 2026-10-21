@@ -69,6 +69,15 @@ TOOLS: List[Dict] = [
                      "FIFO eviction round) live, in [0, 1)."),
      "inputSchema": _obj({"pct": {"type": "number"}, "workspace": _WS},
                          ["pct"])},
+    {"name": "clm_set_forget",
+     "description": ("Enable/disable the forgetting strategies live: decay "
+                     "(forgetting-curve demotion of stale longterm plus "
+                     "value-ranked offload) and supersede (updates overwrite "
+                     "older longterm, duplicates dropped at write time). "
+                     "Omitted flags leave the current state untouched."),
+     "inputSchema": _obj({"decay": {"type": "boolean"},
+                          "supersede": {"type": "boolean"}, "workspace": _WS},
+                         [])},
     {"name": "clm_workspaces",
      "description": ("List project workspaces (sandboxes) with their active "
                      "session stats."),
@@ -112,6 +121,18 @@ def _tool_result(sup, name: str, args: Dict[str, Any]) -> Dict:
             ok = h.reinject(int(args.get("block_id", -1)))
             return _text(("re-injected as shortterm" if ok else
                           "block id not in archive"), is_error=not ok)
+        if name == "clm_set_forget":
+            h = sup.harness_for(sid)
+            out = []
+            if "decay" in args:
+                h.cfg.decay_enabled = bool(args["decay"])
+                out.append(f"decay_enabled={h.cfg.decay_enabled}")
+            if "supersede" in args:
+                h.cfg.supersede_enabled = bool(args["supersede"])
+                out.append(f"supersede_enabled={h.cfg.supersede_enabled}")
+            return _text("; ".join(out) or
+                         f"decay_enabled={h.cfg.decay_enabled} "
+                         f"supersede_enabled={h.cfg.supersede_enabled}")
         if name == "clm_set_keep_pct":
             pct = float(args.get("pct", -1))
             if not 0.0 <= pct < 1.0:

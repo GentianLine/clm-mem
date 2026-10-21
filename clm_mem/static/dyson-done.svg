@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24">
+<!-- clm-mem "done": end position for the loader. All panels fused into a closed
+     purple shell, grey seams mark the panel joints at the diagonals, core fully lit. -->
+<g transform="translate(12,12)">
+ <circle r="9" fill="#7c3aed"/>
+ <g stroke="#9aa3ad" stroke-width="1.4" stroke-linecap="round">
+  <line x1="-3.39" y1="-3.39" x2="-6.36" y2="-6.36"/><line x1="3.39" y1="-3.39" x2="6.36" y2="-6.36"/>
+  <line x1="-3.39" y1="3.39" x2="-6.36" y2="6.36"/><line x1="3.39" y1="3.39" x2="6.36" y2="6.36"/>
+ </g>
+ <circle r="4.5" fill="#c084fc"/>
+</g></svg>

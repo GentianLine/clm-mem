@@ -31,10 +31,12 @@ class RemoteConfig:
     """
 
     _FIELDS = ("shortterm_keep_pct", "max_context_tokens",
-               "systemone_evict_threshold")
+               "systemone_evict_threshold", "decay_enabled",
+               "supersede_enabled")
 
     _DEFAULTS = {"shortterm_keep_pct": 0.5, "max_context_tokens": 8192,
-                 "systemone_evict_threshold": 0.7}
+                 "systemone_evict_threshold": 0.7,
+                 "decay_enabled": False, "supersede_enabled": False}
 
     def __init__(self, remote: "RemoteHarness", values: Dict):
         object.__setattr__(self, "_remote", remote)

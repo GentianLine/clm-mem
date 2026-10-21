@@ -281,7 +281,7 @@ class ProxyHandler(BaseHTTPRequestHandler):
     def _static_route(self, path: str) -> bool:
         """Handle UI asset paths; False when the studio is disabled."""
         ui_paths = ("", "/", "/index.html", "/style.css", "/app.js",
-                    "/favicon.svg")
+                    "/favicon.svg", "/dyson.svg", "/dyson-done.svg", "/dyson.js")
         if path not in ui_paths:
             return False
         cfg = self.supervisor.config
@@ -555,6 +555,15 @@ class ProxyHandler(BaseHTTPRequestHandler):
                         400, "systemone_evict_threshold must be in [0, 1]")
                 h.cfg.systemone_evict_threshold = thr
                 changed["systemone_evict_threshold"] = thr
+            # forgetting-strategy toggles (web studio / remote CLI)
+            for k in ("decay_enabled", "supersede_enabled"):
+                v = body.get(k)
+                if v is None:
+                    continue
+                val = v if isinstance(v, bool) else str(v).lower() in (
+                    "true", "1", "on", "yes")
+                setattr(h.cfg, k, val)
+                changed[k] = val
             return self.send_json({"session_id": sid,
                                    "changed": changed, "status": h.status()})
         return self.send_error_json(404, f"no route for {path}")

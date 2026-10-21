@@ -28,6 +28,22 @@ class HarnessConfig:
     # --- SystemOne decision API --------------------------------------------
     systemone_evict_threshold: float = 0.7  # noul confidence needed to evict
 
+    # --- forgetting strategies (opt-in; defaults preserve prior behaviour) --
+    # Strategy 1: decay & reheating -- a forgetting curve over block importance.
+    # Stale longterm demotes to shortterm (so phase-2 FIFO can pick it up) and
+    # phase-3 offload ranks by value instead of strict age. Reheat on access.
+    decay_enabled: bool = False
+    decay_half_life: int = 8        # turns for importance to halve without access
+    demote_threshold: float = 0.45  # effective importance below which long -> short
+    reheat_boost: float = 0.15      # importance bump on access (capped at 1.0)
+    # Strategy 2: supersede -- updates and duplicates overwrite older longterm.
+    # A new fact sharing a subject slot with an older one supersedes it; an
+    # exact duplicate is dropped at write time instead of admitted twice.
+    supersede_enabled: bool = False
+    supersede_fast: bool = False    # when True, a superseded block loses its
+    # importance immediately (forgotten fast); when False it keeps the value
+    # it had and stays eligible for reheating until the decay curve demotes it
+
     # --- files / serving ----------------------------------------------------
     workdir: str = "."                  # context.md / context.jsonl / archive.jsonl live here
     tokenizer_name: str = ""            # HF tokenizer id for exact counts (optional)
@@ -40,3 +56,9 @@ class HarnessConfig:
             raise ValueError("classify_mode must be inline | post | both")
         if self.max_context_tokens < 64:
             raise ValueError("max_context_tokens too small to hold anything useful")
+        if self.decay_half_life < 1:
+            raise ValueError("decay_half_life must be >= 1 turn")
+        if not 0.0 <= self.demote_threshold < 1.0:
+            raise ValueError("demote_threshold must be in [0, 1)")
+        if not 0.0 <= self.reheat_boost <= 1.0:
+            raise ValueError("reheat_boost must be in [0, 1]")

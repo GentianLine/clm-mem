@@ -10,7 +10,8 @@ from .harness import MemoryHarness
 from .llm import OpenAIChat, StubChat, SystemOneClient
 
 HELP = ("commands:  /status   /long   /short   /transient   /recall <text>   "
-        "/reinject <block-id>   /keep <pct>   /quit")
+        "/reinject <block-id>   /keep <pct>   /decay [on|off]   "
+        "/supersede [on|off]   /quit")
 
 
 def chat_loop(h: MemoryHarness) -> None:
@@ -27,6 +28,21 @@ def chat_loop(h: MemoryHarness) -> None:
             break
         if text == "/status":
             print(h.status())
+            continue
+        if text.split(maxsplit=1)[0] in ("/decay", "/supersede"):
+            attr = {"/decay": "decay_enabled",
+                    "/supersede": "supersede_enabled"}[text.split()[0]]
+            parts = text.split()
+            if len(parts) == 1:      # bare command: toggle
+                setattr(h.cfg, attr, not getattr(h.cfg, attr))
+            elif parts[1].lower() in ("on", "true", "1", "yes"):
+                setattr(h.cfg, attr, True)
+            elif parts[1].lower() in ("off", "false", "0", "no"):
+                setattr(h.cfg, attr, False)
+            else:
+                print("  usage: /decay [on|off] or /supersede [on|off]")
+                continue
+            print(f"  {attr} = {getattr(h.cfg, attr)}")
             continue
         if text.startswith("/keep"):
             try:
@@ -102,6 +118,28 @@ def _add_harness_flags(sub: argparse.ArgumentParser) -> None:
                           "(higher = more conservative, keep more memory). "
                           "Default 0.7, or 0.55 under --use-mock so the "
                           "bundled mock decisions visibly evict")
+    # --- forgetting strategies (toggles; default off) -----------------------
+    sub.add_argument("--decay", dest="decay", action="store_true",
+                     default=False,
+                     help="enable decay & reheating: long-term facts lose value "
+                          "on a forgetting curve unless accessed, demote to "
+                          "short-term below the floor, and phase-3 offload "
+                          "ranks by value instead of age")
+    sub.add_argument("--no-decay", dest="decay", action="store_false",
+                     help="disable decay & reheating (default)")
+    sub.add_argument("--decay-half-life", type=int, default=8,
+                     help="turns for importance to halve without access")
+    sub.add_argument("--demote-threshold", type=float, default=0.45,
+                     help="effective importance below which a long-term block "
+                          "becomes short-term (working state again)")
+    sub.add_argument("--supersede", dest="supersede", action="store_true",
+                     default=False,
+                     help="enable supersession: a new long-term fact that "
+                          "shares a subject slot (codename/port/id/...) with "
+                          "an older one supersedes it; exact duplicates are "
+                          "dropped at write time instead of admitted twice")
+    sub.add_argument("--no-supersede", dest="supersede", action="store_false",
+                     help="disable supersession (default)")
 
 
 def _add_common(sub: argparse.ArgumentParser) -> None:
@@ -149,6 +187,10 @@ def _cfg(a: argparse.Namespace,
         workdir=a.workdir,
         tokenizer_name=a.tokenizer or fb,
         systemone_evict_threshold=thr,
+        decay_enabled=a.decay,
+        decay_half_life=a.decay_half_life,
+        demote_threshold=a.demote_threshold,
+        supersede_enabled=a.supersede,
     )
 
 

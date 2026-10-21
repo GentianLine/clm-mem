@@ -22,3 +22,5 @@ class Block:
     tag: str = TRANSIENT           # longterm | shortterm | transient
     turn: int = 0                  # conversation turn when created (FIFO order)
     pinned: bool = False           # e.g. system prompt -- never evicted
+    importance: float = 0.0        # base value, assigned from tag on add()
+    last_access: int = -1          # turn of last reheat; creation turn if unset

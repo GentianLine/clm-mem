@@ -8,9 +8,13 @@
 <link rel="stylesheet" href="/style.css">
 </head>
 <body>
+<div id="splash">
+  <img src="/dyson.svg" width="72" height="72" alt="">
+  <span class="splash-name">clm-mem <em>studio</em></span>
+</div>
 <header>
   <div class="brand">
-    <svg class="logo" viewBox="0 0 24 24"><path d="M12 3a9 9 0 1 0 9 9h-3a6 6 0 1 1-6-6V3z"/><path d="M12 8a4 4 0 1 0 4 4h-2a2 2 0 1 1-2-2V8z"/></svg>
+    <svg class="logo" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9" fill="#7c3aed"/><circle cx="12" cy="12" r="9" fill="none" stroke="#9aa3ad" stroke-width="3" stroke-dasharray="4.398 9.739" stroke-dashoffset="-2.199"/><circle cx="12" cy="12" r="4.1" fill="#c084fc"/></svg>
     <span class="name">clm-mem <em>studio</em></span>
   </div>
   <div class="status-pills" id="pills"></div>
@@ -95,12 +99,19 @@
       <label class="tune">evict threshold (SystemOne noul)
         <input type="range" id="thrSlider" min="0" max="100" step="5" value="70">
         <output id="thrOut">0.70</output></label>
+      <div class="tune-group">forgetting strategies</div>
+      <label class="tune check">decay &amp; reheating (forgetting curve)
+        <input type="checkbox" id="decayOn"></label>
+      <label class="tune check">supersede updates &amp; duplicates
+        <input type="checkbox" id="supOn"></label>
       <p class="note">Changes apply live to the selected project's session.</p>
     </div>
   </aside>
 </main>
 
 <div id="toast"></div>
+<script src="/dyson.js"></script>
+<script src="/dyson.js"></script>
 <script src="/app.js"></script>
 </body>
 </html>

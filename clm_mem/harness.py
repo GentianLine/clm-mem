@@ -4,9 +4,24 @@ import dataclasses
 import json
 import math
 import os
+import re
 import time
 from typing import Dict, List, Optional
 from .blocks import LONG, SHORT, TRANSIENT, VALID_TAGS, Block
+
+#: Base value assigned at classification time (forgetting-curve seed).
+BASE_IMPORTANCE = {LONG: 1.0, SHORT: 0.6, TRANSIENT: 0.3}
+
+#: Subject-slot extraction for supersession: ``codename Nova-7``, ``port=8012``,
+#: ``port is 8012``. Deterministic lexical slots -- no model call, no embeddings.
+#: ``id`` deliberately excluded as a named slot (too generic): free-standing
+#: identifiers participate in reheating only, never in supersession.
+SLOT_RE = re.compile(
+    r"\b(codename|password|secret|token|api[_-]?key|version|port)\b"
+    r"(?:[\s:=]{0,3}(?:(?:is|are|were|was|set|to|named|called)[\s:=]+)*?)"
+    r"([A-Za-z0-9]+(?:[-_.][A-Za-z0-9]+)*)", re.I)
+#: Free-standing versioned identifiers (``Nova-7``) usable for reheating.
+ID_RE = re.compile(r"\b([A-Za-z][A-Za-z+]+-\d+)\b")
 from .config import HarnessConfig
 from .tagging import CLASSIFIER_SYSTEM, MEMORY_PREAMBLE, TAG_RE, split_tagged, strip_tags
 from .tokens import TokenCounter
@@ -79,10 +94,17 @@ class MemoryHarness:
     def add(self, role: str, content: str, tag: str = TRANSIENT,
             pinned: bool = False) -> Block:
         b = Block(id=self._next_id, role=role, content=content.strip(),
-                  tag=tag, turn=self.turn, pinned=pinned)
+                  tag=tag, turn=self.turn, pinned=pinned,
+                  importance=BASE_IMPORTANCE.get(tag, 0.3),
+                  last_access=self.turn)
         self._next_id += 1
         self.blocks.append(b)
         return b
+
+    def _retag(self, b: Block, new_tag: str) -> None:
+        """Re-tag a block and re-seed its importance (never below the floor)."""
+        b.tag = new_tag
+        b.importance = max(BASE_IMPORTANCE.get(new_tag, 0.3), b.importance)
 
     def tokens(self) -> int:
         return sum(self.counter.count_block(b) for b in self.blocks)
@@ -139,7 +161,7 @@ class MemoryHarness:
         for lab in data.get("labels", []):
             bid, tag = lab.get("id"), str(lab.get("tag", "")).lower()
             if bid in by_id and tag in VALID_TAGS and not by_id[bid].pinned:
-                by_id[bid].tag = tag
+                self._retag(by_id[bid], tag)
 
     def _classify_with_systemone(self, cands: List[Block]) -> None:
         """Batched post-turn classification using SystemOne choice questions."""
@@ -167,10 +189,117 @@ class MemoryHarness:
             choice = resp["answers"].get(qid, {}).get("choice", TRANSIENT)
             if choice in VALID_TAGS and not by_id[b.id].pinned:
                 old_tag = by_id[b.id].tag
-                by_id[b.id].tag = choice
                 if old_tag != choice:
+                    self._retag(by_id[b.id], choice)
                     self._event("classify",
                                 f"reclassified #{b.id}: {old_tag} -> {choice}")
+
+    # -- forgetting strategies (phase-0 maintenance) --------------------------
+    # Two opt-in passes that attack longterm saturation from complementary
+    # directions: decay & reheating forgets *slowly* along a time-based
+    # forgetting curve; supersede forgets *fast* when an update or duplicate
+    # contradicts what is already stored. Both are pure local heuristics --
+    # no model calls -- so they stay deterministic and cheap.
+    def eff_importance(self, b: Block) -> float:
+        """Importance discounted by turns since last access (half-life curve)."""
+        gap = max(0, self.turn - b.last_access)
+        return b.importance * math.pow(0.5, gap / self.cfg.decay_half_life)
+
+    @staticmethod
+    def _slots(text: str) -> dict:
+        """Named subject slots ``slot -> value`` (supersession keys)."""
+        return {k.lower(): v for k, v in SLOT_RE.findall(text)}
+
+    @classmethod
+    def _key_values(cls, text: str) -> set:
+        """Lowercased value tokens used for access matching (reheating): slot
+        values plus free-standing identifiers like ``Nova-7`` or ``sk-42``."""
+        vals = {v.lower() for v in cls._slots(text).values()}
+        vals |= {t.lower() for t in ID_RE.findall(text)}
+        return vals
+
+    def reheat(self, text: str) -> int:
+        """Access event: blocks whose identifiers appear in ``text`` warm up."""
+        vals = self._key_values(text)
+        if not vals:
+            return 0
+        n = 0
+        for b in self.blocks:
+            if b.pinned or b.last_access == self.turn:
+                continue
+            if MemoryHarness._key_values(b.content) & vals:
+                b.last_access = self.turn
+                b.importance = min(1.0, b.importance + self.cfg.reheat_boost)
+                n += 1
+        return n
+
+    def _decay_demote(self, log: List[Dict]) -> None:
+        """Longterm whose effective importance fell below the demotion floor
+        becomes shortterm -- working state again, so phase-2 FIFO can pick it
+        up. Demotion never destroys; archive paths stay append-only."""
+        for b in self.blocks:
+            if b.tag != LONG or b.pinned:
+                continue
+            eff = self.eff_importance(b)
+            if eff < self.cfg.demote_threshold:
+                self._retag(b, SHORT)
+                log.append(self._mk(
+                    "maintain-decay",
+                    f"demoted longterm #{b.id} -> shortterm "
+                    f"(eff={eff:.2f} stale {self.turn - b.last_access} turns)"))
+
+    def _supersede_pass(self, log: List[Dict]) -> None:
+        """Updates overwrite: a new long fact sharing a subject slot with an
+        older live long fact supersedes it (old demotes and is labelled);
+        an exact duplicate is dropped at write time instead of admitted."""
+        fresh = [b for b in self.blocks
+                 if b.tag == LONG and not b.pinned and b.turn == self.turn]
+        if not fresh:
+            return
+        # Candidates include demoted/superseded blocks: a restatement of a
+        # fact that already lost its long tag is still a duplicate write.
+        older = [(o, MemoryHarness._slots(o.content)) for o in self.blocks
+                 if not o.pinned and o.turn < self.turn]
+        for new in fresh:
+            nslots = MemoryHarness._slots(new.content)
+            if not nslots:
+                continue
+            dup_of = None
+            hits: List[tuple] = []          # (old block, shared slot names)
+            for old, oslots in older:
+                shared = sorted(set(nslots) & set(oslots))
+                if not shared:
+                    continue
+                # duplicate only when *every* shared slot agrees on its value;
+                # a partial match (same codename, new port) is an update.
+                if all(nslots[s].lower() == oslots[s].lower() for s in shared):
+                    dup_of = old
+                    break
+                hits.append((old, shared))
+            if dup_of is not None:
+                # duplicate write: keep the original, drop this copy (archived,
+                # still recallable), and reheat the survivor as touched.
+                dup_of.last_access = self.turn
+                self._drop([new])
+                log.append(self._mk(
+                    "maintain-dedup",
+                    f"dropped duplicate longterm #{new.id} "
+                    f"(same value as #{dup_of.id})"))
+                continue
+            for old, shared in hits:
+                old.last_access = self.turn
+                prefix = f"[superseded by #{new.id}] "
+                if not old.content.startswith(prefix):
+                    old.content = prefix + old.content
+                self._retag(old, SHORT)
+                if self.cfg.supersede_fast:
+                    # forgotten fast: a contradicted fact loses its value at
+                    # once instead of riding the decay curve down
+                    old.importance = min(0.3, old.importance)
+                log.append(self._mk(
+                    "maintain-supersede",
+                    f"longterm #{old.id} superseded by new #{new.id} "
+                    f"(slots: {', '.join(shared)})"))
 
     # -- eviction engine ------------------------------------------------------
     def evict(self) -> List[str]:
@@ -184,7 +313,14 @@ class MemoryHarness:
                  and leave an evictable pointer stub.
         """
         log: List[Dict] = []
+
+        # Phase 0 -- forgetting strategies (opt-in): run maintenance passes on
+        # every enforcement point. Both are local heuristics, so they stay
+        # deterministic and never touch the backend.
+        self._maintain(log)
+
         if not self.over_budget():
+            self.events.extend(log)      # maintenance events still surface
             return log
 
         # Phase 1 -- delete everything that is neither longterm nor shortterm.
@@ -220,10 +356,15 @@ class MemoryHarness:
                 f"FIFO-evicted {len(drop)} of {len(shorts)} shortterm "
                 f"(kept newest {self.cfg.shortterm_keep_pct:.0%})"))
 
-        # Phase 3 -- longterm overflow: offload oldest, leave a pointer.
+        # Phase 3 -- longterm overflow: offload, leave a pointer. Strict FIFO
+        # (oldest first) unless decay is on, in which case the weakest live
+        # long fact leaves first regardless of age.
         if self.over_budget() and self.cfg.offload_overflow:
-            longs = sorted((b for b in self.blocks
-                            if b.tag == LONG and not b.pinned), key=lambda b: b.id)
+            longs = [b for b in self.blocks if b.tag == LONG and not b.pinned]
+            if self.cfg.decay_enabled:
+                longs.sort(key=lambda b: (self.eff_importance(b), b.id))
+            else:
+                longs.sort(key=lambda b: b.id)
             while self.over_budget() and longs:
                 b = longs.pop(0)
                 # Backstop: ask SystemOne before offloading longterm memory
@@ -251,6 +392,14 @@ class MemoryHarness:
                 "(pinned + longterm alone exceed the window)"))
         self.events.extend(log)
         return log
+
+    def _maintain(self, log: List[Dict]) -> None:
+        """Phase-0 passes: supersession first (an update must be adjudicated
+        before decay removes its candidate), then the forgetting curve."""
+        if self.cfg.supersede_enabled:
+            self._supersede_pass(log)
+        if self.cfg.decay_enabled:
+            self._decay_demote(log)
 
     def _backstop_eviction(self, doomed: List[Block], phase: str,
                            log: List[str]) -> List[Block]:
@@ -376,6 +525,12 @@ class MemoryHarness:
                 self._event("classify", f"pre-classify failed: {e}")
         self.add("user", user_text, tag=tag)
 
+        if self.cfg.decay_enabled:
+            n = self.reheat(user_text)
+            if n:
+                self._event("maintain-reheat",
+                            f"reheated {n} block(s) on access")
+
         self.evict()                                  # room BEFORE generating
         raw = self.llm.chat(self.serialize_messages())
         if TAG_RE.search(raw) and self.cfg.classify_mode in ("inline", "both"):
@@ -432,6 +587,8 @@ class MemoryHarness:
                 "tokens": self.counter.count_block(b),
                 "chars": len(b.content),
             }
+            if self.cfg.decay_enabled:
+                entry["importance"] = round(self.eff_importance(b), 3)
             if include_full or len(b.content) <= preview_chars:
                 entry["content"] = b.content
                 entry["truncated"] = False
@@ -445,6 +602,10 @@ class MemoryHarness:
             "budget": self.cfg.max_context_tokens,
             "counts": self.counts(),
             "shortterm_keep_pct": self.cfg.shortterm_keep_pct,
+            "decay_enabled": self.cfg.decay_enabled,
+            "supersede_enabled": self.cfg.supersede_enabled,
+            "decay_half_life": self.cfg.decay_half_life,
+            "demote_threshold": self.cfg.demote_threshold,
             "archive": self.archive_size(),
             "blocks": blocks,
             "events": self.events[-events_tail:],

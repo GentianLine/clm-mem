@@ -1,0 +1,24 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24">
+<!-- clm-mem dyson loader. Four grey build-panels orbit a tilted belt around the
+     purple shell; each panel rides behind the sphere on the far half-lap and
+     in front on the near half, so the spin reads as 3-D. Group scale breathes,
+     core pulses. Pure SMIL: animates inside <img> tags with no JS. -->
+<g transform="translate(12,12)"><g>
+ <animateTransform attributeName="transform" type="scale" values="0.95;1.03;0.95"
+   keyTimes="0;.5;1" dur="4s" calcMode="spline" keySplines=".42 0 .58 1;.42 0 .58 1"
+   repeatCount="indefinite"/>
+ <ellipse rx="9.7" ry="3.7" transform="rotate(-18)" fill="none" stroke="#2d3540" stroke-width="0.8"/>
+ <rect x="-1.15" y="-1.15" width="2.3" height="2.3" fill="#6e7a89" opacity="0"><animateMotion dur="4s" repeatCount="indefinite" path="M-9.7,0 a9.7,3.7 -18 1 1 19.4,0 a9.7,3.7 -18 1 1 -19.4,0"/><animate attributeName="opacity" values="1;1;0;0" keyTimes="0;.45;.5;.98" dur="4s" calcMode="linear" /></rect>
+ <rect x="-1.15" y="-1.15" width="2.3" height="2.3" fill="#6e7a89" opacity="0"><animateMotion dur="4s" begin="-1s" repeatCount="indefinite" path="M-9.7,0 a9.7,3.7 -18 1 1 19.4,0 a9.7,3.7 -18 1 1 -19.4,0"/><animate attributeName="opacity" values="1;1;0;0" keyTimes="0;.45;.5;.98" dur="4s" calcMode="linear" begin="-1s" /></rect>
+ <rect x="-1.15" y="-1.15" width="2.3" height="2.3" fill="#6e7a89" opacity="0"><animateMotion dur="4s" begin="-2s" repeatCount="indefinite" path="M-9.7,0 a9.7,3.7 -18 1 1 19.4,0 a9.7,3.7 -18 1 1 -19.4,0"/><animate attributeName="opacity" values="1;1;0;0" keyTimes="0;.45;.5;.98" dur="4s" calcMode="linear" begin="-2s" /></rect>
+ <rect x="-1.15" y="-1.15" width="2.3" height="2.3" fill="#6e7a89" opacity="0"><animateMotion dur="4s" begin="-3s" repeatCount="indefinite" path="M-9.7,0 a9.7,3.7 -18 1 1 19.4,0 a9.7,3.7 -18 1 1 -19.4,0"/><animate attributeName="opacity" values="1;1;0;0" keyTimes="0;.45;.5;.98" dur="4s" calcMode="linear" begin="-3s" /></rect>
+ <circle r="7.4" fill="#7c3aed"/>
+ <circle r="3.2" fill="#c084fc">
+  <animate attributeName="r" values="2.9;3.6;2.9" dur="2s" calcMode="spline" keySplines=".42 0 .58 1;.42 0 .58 1" repeatCount="indefinite"/>
+ </circle>
+ <rect x="-1.35" y="-1.35" width="2.7" height="2.7" fill="#9aa3ad" opacity="0"><animateMotion dur="4s" repeatCount="indefinite" path="M-9.7,0 a9.7,3.7 -18 1 1 19.4,0 a9.7,3.7 -18 1 1 -19.4,0"/><animate attributeName="opacity" values="0;0;1;1" keyTimes="0;.45;.5;.98" dur="4s" calcMode="linear" /></rect>
+ <rect x="-1.35" y="-1.35" width="2.7" height="2.7" fill="#9aa3ad" opacity="0"><animateMotion dur="4s" begin="-1s" repeatCount="indefinite" path="M-9.7,0 a9.7,3.7 -18 1 1 19.4,0 a9.7,3.7 -18 1 1 -19.4,0"/><animate attributeName="opacity" values="0;0;1;1" keyTimes="0;.45;.5;.98" dur="4s" calcMode="linear" begin="-1s" /></rect>
+ <rect x="-1.35" y="-1.35" width="2.7" height="2.7" fill="#9aa3ad" opacity="0"><animateMotion dur="4s" begin="-2s" repeatCount="indefinite" path="M-9.7,0 a9.7,3.7 -18 1 1 19.4,0 a9.7,3.7 -18 1 1 -19.4,0"/><animate attributeName="opacity" values="0;0;1;1" keyTimes="0;.45;.5;.98" dur="4s" calcMode="linear" begin="-2s" /></rect>
+ <rect x="-1.35" y="-1.35" width="2.7" height="2.7" fill="#9aa3ad" opacity="0"><animateMotion dur="4s" begin="-3s" repeatCount="indefinite" path="M-9.7,0 a9.7,3.7 -18 1 1 19.4,0 a9.7,3.7 -18 1 1 -19.4,0"/><animate attributeName="opacity" values="0;0;1;1" keyTimes="0;.45;.5;.98" dur="4s" calcMode="linear" begin="-3s" /></rect>
+</g></g>
+</svg>
