@@ -16,6 +16,7 @@ Run them as modules:
 Once listening they print a single READY line on stdout:
     {"ready": true, "pid": ..., "host": "...", "port": ...}
 """
+
 from __future__ import annotations
 import argparse
 import json
@@ -41,19 +42,25 @@ def _word_chunks(text: str, size: int = 8):
 
 
 class _Silent(BaseHTTPRequestHandler):
-    def log_message(self, fmt, *args):   # pragma: no cover - noise control
+    def log_message(self, fmt, *args):  # pragma: no cover - noise control
         if os.environ.get("CLM_MEM_VERBOSE"):
             super().log_message(fmt, *args)
 
     def _cors(self):
         self.send_header("Access-Control-Allow-Origin", "*")
-        self.send_header("Access-Control-Allow-Headers",
-                         "Content-Type, Authorization, X-Cllm-Mem-Session")
-        self.send_header("Access-Control-Allow-Methods",
-                         "GET, POST, DELETE, OPTIONS")
+        self.send_header(
+            "Access-Control-Allow-Headers",
+            "Content-Type, Authorization, X-Cllm-Mem-Session",
+        )
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
 
-    def _send(self, status: int, payload: bytes | None = None,
-              content_type: str = "application/json", extra=None):
+    def _send(
+        self,
+        status: int,
+        payload: bytes | None = None,
+        content_type: str = "application/json",
+        extra=None,
+    ):
         self.send_response(status)
         self._cors()
         if payload is None:
@@ -82,7 +89,8 @@ class LLMHandler(_Silent):
     MODEL = os.environ.get("CLM_MEM_MODEL", "mock-model")
 
     def setup_chat(self):
-        from .llm import StubChat          # lazy, keeps stdlib-only startup
+        from .llm import StubChat  # lazy, keeps stdlib-only startup
+
         if getattr(type(self), "_chat", None) is None:
             type(self)._chat = StubChat()  # shared across requests (stateless anyway)
         return type(self)._chat
@@ -111,10 +119,19 @@ class LLMHandler(_Silent):
         created = int(time.time())
 
         def chunk(delta, finish=None):
-            obj = {"id": "mock-proxy-1", "object": "chat.completion.chunk",
-                   "created": created, "model": model,
-                   "choices": [{"index": 0, "delta": delta,
-                                **({"finish_reason": finish} if finish else {})}]}
+            obj = {
+                "id": "mock-proxy-1",
+                "object": "chat.completion.chunk",
+                "created": created,
+                "model": model,
+                "choices": [
+                    {
+                        "index": 0,
+                        "delta": delta,
+                        **({"finish_reason": finish} if finish else {}),
+                    }
+                ],
+            }
             self.wfile.write(f"data: {json.dumps(obj)}\n\n".encode())
             self.wfile.flush()
 
@@ -130,12 +147,22 @@ class LLMHandler(_Silent):
         if path in ("/health", "/v1/health"):
             self.send_json({"status": "ok", "model": self.MODEL})
         elif path == "/version":
-            self.send_json({"version": "mock", "built_at": 0,
-                            "llama.cpp": {"version": "mock"}})
+            self.send_json(
+                {"version": "mock", "built_at": 0, "llama.cpp": {"version": "mock"}}
+            )
         elif path == "/v1/models":
-            self.send_json({"object": "list",
-                            "data": [{"id": self.MODEL, "object": "model",
-                                      "owned_by": "clm-mem-mock"}]})
+            self.send_json(
+                {
+                    "object": "list",
+                    "data": [
+                        {
+                            "id": self.MODEL,
+                            "object": "model",
+                            "owned_by": "clm-mem-mock",
+                        }
+                    ],
+                }
+            )
         elif path == "/props":
             self.send_json({"model_type": "mock", "n_ctx": 4096})
         elif path == "/metrics":
@@ -152,20 +179,35 @@ class LLMHandler(_Silent):
             if body.get("stream"):
                 self._sse_stream(reply, model)
                 return
-            resp = {"id": "mock-proxy-1", "object": "chat.completion",
-                    "created": int(time.time()), "model": model,
-                    "choices": [{"index": 0,
-                                 "message": {"role": "assistant",
-                                             "content": reply},
-                                 "finish_reason": "stop"}],
-                    "usage": {"prompt_tokens": 1, "completion_tokens": 1,
-                              "total_tokens": 2}}
+            resp = {
+                "id": "mock-proxy-1",
+                "object": "chat.completion",
+                "created": int(time.time()),
+                "model": model,
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {"role": "assistant", "content": reply},
+                        "finish_reason": "stop",
+                    }
+                ],
+                "usage": {
+                    "prompt_tokens": 1,
+                    "completion_tokens": 1,
+                    "total_tokens": 2,
+                },
+            }
             self.send_json(resp)
         elif path == "/completion":
             reply = self._reply_for(body)
-            self.send_json({"content": reply, "truncated": 0,
-                            "stop_type": "eos", "token_count":
-                            len(reply.split())})
+            self.send_json(
+                {
+                    "content": reply,
+                    "truncated": 0,
+                    "stop_type": "eos",
+                    "token_count": len(reply.split()),
+                }
+            )
         else:
             self.send_json({"error": "not found", "path": path}, 404)
 
@@ -192,13 +234,13 @@ class SystemOneHandler(_Silent):
         if path not in self.SYSTEMONE_PATHS:
             self.send_json({"error": "not found", "path": path}, 404)
             return
-        from .llm import MockSystemOne     # lazy
+        from .llm import MockSystemOne  # lazy
+
         body = self.read_body()
         mock = MockSystemOne()
         try:
-            resp = mock.system_one(body.get("state", ""),
-                                   body.get("questions", {}))
-        except Exception as e:             # never crash the mock server
+            resp = mock.system_one(body.get("state", ""), body.get("questions", {}))
+        except Exception as e:  # never crash the mock server
             resp = {"error": str(e)}
         self.send_json(resp)
 
@@ -212,11 +254,15 @@ def serve_forever_with_mock(kind: str, host: str = "127.0.0.1", port: int = 0):
         raise ValueError(f"unknown mock kind {kind!r}")
     httpd = ThreadingHTTPServer((host, port), HANDLERS[kind])
     httpd.daemon_threads = True
-    print(json.dumps({"ready": True, "pid": os.getpid(),
-                      "host": host, "port": httpd.server_port}), flush=True)
+    print(
+        json.dumps(
+            {"ready": True, "pid": os.getpid(), "host": host, "port": httpd.server_port}
+        ),
+        flush=True,
+    )
     try:
         httpd.serve_forever()
-    except KeyboardInterrupt:               # pragma: no cover - interactive stop
+    except KeyboardInterrupt:  # pragma: no cover - interactive stop
         pass
     finally:
         httpd.server_close()
@@ -225,14 +271,13 @@ def serve_forever_with_mock(kind: str, host: str = "127.0.0.1", port: int = 0):
 def main(argv=None):
     p = argparse.ArgumentParser(
         prog="clm_mem.mock_backends",
-        description="Mock llama.cpp / SystemOne HTTP backends for testing.")
+        description="Mock llama.cpp / SystemOne HTTP backends for testing.",
+    )
     p.add_argument("--kind", required=True, choices=sorted(HANDLERS))
     # ProcessManager exports CLM_MEM_HOST / CLM_MEM_PORT; fall back to them so
     # a bare `python -m clm_mem.mock_backends --kind llm` binds the right port.
-    p.add_argument("--host",
-                   default=os.environ.get("CLM_MEM_HOST", "127.0.0.1"))
-    p.add_argument("--port", type=int,
-                   default=int(os.environ.get("CLM_MEM_PORT", "0")))
+    p.add_argument("--host", default=os.environ.get("CLM_MEM_HOST", "127.0.0.1"))
+    p.add_argument("--port", type=int, default=int(os.environ.get("CLM_MEM_PORT", "0")))
     a = p.parse_args(argv)
     serve_forever_with_mock(a.kind, host=a.host, port=a.port)
 

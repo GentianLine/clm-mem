@@ -11,6 +11,7 @@ Quick start:
                       HarnessConfig(max_context_tokens=8192, shortterm_keep_pct=0.5))
     print(h.step("Remember: the deploy port is 8080."))
 """
+
 from .blocks import LONG, SHORT, TRANSIENT, VALID_TAGS, Block
 from .config import HarnessConfig
 from .harness import MemoryHarness
@@ -22,8 +23,20 @@ from .tokens import TokenCounter
 
 __version__ = "0.3.0"
 __all__ = [
-    "Block", "HarnessConfig", "MemoryHarness", "OpenAIChat", "StubChat",
-    "ProxyConfig", "Supervisor", "start_supervisor", "RemoteHarness",
-    "TokenCounter", "split_tagged",
-    "LONG", "SHORT", "TRANSIENT", "VALID_TAGS", "__version__",
+    "Block",
+    "HarnessConfig",
+    "MemoryHarness",
+    "OpenAIChat",
+    "StubChat",
+    "ProxyConfig",
+    "Supervisor",
+    "start_supervisor",
+    "RemoteHarness",
+    "TokenCounter",
+    "split_tagged",
+    "LONG",
+    "SHORT",
+    "TRANSIENT",
+    "VALID_TAGS",
+    "__version__",
 ]

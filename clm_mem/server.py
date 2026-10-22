@@ -17,6 +17,7 @@ together with a REST surface (`/v1/clm/*`) and an MCP server endpoint
 Nothing is downloaded or compiled here -- real backends are only ever exec'd
 from binaries you point at; the bundled mocks cover testing.
 """
+
 from __future__ import annotations
 import json
 import os
@@ -59,12 +60,13 @@ def normalize_root(url: str) -> str:
     """http://host:8000/v1/ -> http://host:8000 (root, not OpenAI base)."""
     url = url.rstrip("/")
     if url.endswith("/v1"):
-        url = url[: -3].rstrip("/")
+        url = url[:-3].rstrip("/")
     return url
 
 
-def discover_backend_ctx(root_url: str, timeout: float = 5.0,
-                         api_key: str = "") -> Optional[int]:
+def discover_backend_ctx(
+    root_url: str, timeout: float = 5.0, api_key: str = ""
+) -> Optional[int]:
     """Read the live context window of a llama.cpp-style backend.
 
     Checks ``/props`` (llama.cpp puts it under
@@ -75,6 +77,7 @@ def discover_backend_ctx(root_url: str, timeout: float = 5.0,
     require one even on discovery routes like /props and /v1/models).
     """
     import urllib.request
+
     auth = {"Authorization": f"Bearer {api_key}"} if api_key else {}
     urls = (f"{root_url}/props", f"{root_url}/v1/props")
     for url in urls:
@@ -86,8 +89,11 @@ def discover_backend_ctx(root_url: str, timeout: float = 5.0,
             continue
         if not isinstance(props, dict):
             continue
-        cand = (props.get("default_generation_settings") or {}).\
-            get("n_ctx") or props.get("n_ctx") or props.get("n_ctx_train")
+        cand = (
+            (props.get("default_generation_settings") or {}).get("n_ctx")
+            or props.get("n_ctx")
+            or props.get("n_ctx_train")
+        )
         try:
             cand = int(cand)
         except (TypeError, ValueError):
@@ -95,8 +101,7 @@ def discover_backend_ctx(root_url: str, timeout: float = 5.0,
         if cand > 1:
             return cand
     try:
-        req = urllib.request.Request(f"{root_url}/v1/models",
-                                     headers=dict(auth))
+        req = urllib.request.Request(f"{root_url}/v1/models", headers=dict(auth))
         with urllib.request.urlopen(req, timeout=timeout) as r:
             data = json.loads(r.read().decode()).get("data", [])
         for m in data:
@@ -114,41 +119,44 @@ def discover_backend_ctx(root_url: str, timeout: float = 5.0,
 
 @dataclass
 class ProxyConfig:
-    backend_root: Optional[str] = None      # e.g. http://127.0.0.1:8081
-    backend_api_key: str = ""               # bearer for hosted chat backends
-    systemone_root: Optional[str] = None    # e.g. http://127.0.0.1:8010
-    systemone_model: str = ""               # model id sent to the decision API
-    systemone_api_key: str = ""             # bearer for hosted decision APIs
+    backend_root: Optional[str] = None  # e.g. http://127.0.0.1:8081
+    backend_api_key: str = ""  # bearer for hosted chat backends
+    systemone_root: Optional[str] = None  # e.g. http://127.0.0.1:8010
+    systemone_model: str = ""  # model id sent to the decision API
+    systemone_api_key: str = ""  # bearer for hosted decision APIs
     served_model: str = "clm-mem-model"
     harness_kwargs: dict = field(default_factory=dict)
     chat_temperature: float = 0.6
     chat_max_tokens: int = 1024
     request_timeout: float = 300.0
-    ui_enabled: bool = True                 # serve the bundled web studio at /
-    backend_ctx: Optional[int] = None       # live llama.cpp window (from /props)
-    systemone_alias: str = ""               # cached decision endpoint path
+    ui_enabled: bool = True  # serve the bundled web studio at /
+    backend_ctx: Optional[int] = None  # live llama.cpp window (from /props)
+    systemone_alias: str = ""  # cached decision endpoint path
 
 
 class ProxyHandler(BaseHTTPRequestHandler):
     """llama.cpp-shaped HTTP surface; ``self.server.supervisor`` carries state."""
+
     server_version = f"clm-mem-proxy/{VERSION}"
 
     # -- plumbing ---------------------------------------------------------
-    def log_message(self, fmt, *args):   # pragma: no cover - noise control
+    def log_message(self, fmt, *args):  # pragma: no cover - noise control
         import os
+
         if os.environ.get("CLM_MEM_VERBOSE"):
             BaseHTTPRequestHandler.log_message(self, fmt, *args)
 
     @property
     def supervisor(self):
-        return self.server.supervisor       # type: ignore[attr-defined]
+        return self.server.supervisor  # type: ignore[attr-defined]
 
     def _cors(self):
         self.send_header("Access-Control-Allow-Origin", "*")
-        self.send_header("Access-Control-Allow-Headers",
-                         f"Content-Type, Authorization, {SESSION_HEADER}")
-        self.send_header("Access-Control-Allow-Methods",
-                         "GET, POST, DELETE, OPTIONS")
+        self.send_header(
+            "Access-Control-Allow-Headers",
+            f"Content-Type, Authorization, {SESSION_HEADER}",
+        )
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
 
     def send_json(self, obj, status: int = 200):
         payload = json.dumps(obj).encode()
@@ -160,16 +168,16 @@ class ProxyHandler(BaseHTTPRequestHandler):
         self.wfile.write(payload)
 
     def send_error_json(self, status: int, msg: str):
-        self.send_json({"error": {"message": msg, "type": "proxy",
-                                  "code": status}}, status)
+        self.send_json(
+            {"error": {"message": msg, "type": "proxy", "code": status}}, status
+        )
 
     def read_body_bytes(self) -> bytes:
         length = int(self.headers.get("Content-Length") or 0)
         return self.rfile.read(length) if length else b""
 
     # -- forwarding --------------------------------------------------------
-    def _respond_payload(self, status: int, payload: bytes,
-                         content_type: str):
+    def _respond_payload(self, status: int, payload: bytes, content_type: str):
         self.send_response(status)
         self._cors()
         self.send_header("Content-Type", content_type or "application/json")
@@ -203,29 +211,36 @@ class ProxyHandler(BaseHTTPRequestHandler):
             api_key = f"Bearer {api_key}"
         return {"Authorization": api_key}
 
-    def _forward(self, method: str, url: str, body: bytes | None = None,
-                 stream: bool = False, probe: bool = False,
-                 api_key: Optional[str] = None):
+    def _forward(
+        self,
+        method: str,
+        url: str,
+        body: bytes | None = None,
+        stream: bool = False,
+        probe: bool = False,
+        api_key: Optional[str] = None,
+    ):
         """Proxy one request to a backend. With ``probe=True`` the response is
         buffered and NOT sent to the client; True means "this alias exists"
         (any HTTP status other than 404/405), False means try another path.
         ``api_key`` overrides the credential carried upstream (see
         :meth:`_auth_header`)."""
-        headers = {"Content-Type": "application/json",
-                   **self._auth_header(api_key)}
+        headers = {"Content-Type": "application/json", **self._auth_header(api_key)}
         req = urllib.request.Request(
-            url, data=body if method.upper() != "GET" else None,
-            headers=headers)
+            url, data=body if method.upper() != "GET" else None, headers=headers
+        )
         try:
-            resp = urllib.request.urlopen(req,
-                                          timeout=self.supervisor.config.request_timeout)
+            resp = urllib.request.urlopen(
+                req, timeout=self.supervisor.config.request_timeout
+            )
         except urllib.error.HTTPError as e:
             if probe and e.code in (404, 405):
                 return False
-            self._respond_payload(e.code, e.read(),
-                                  e.headers.get("Content-Type", "application/json"))
+            self._respond_payload(
+                e.code, e.read(), e.headers.get("Content-Type", "application/json")
+            )
             return True
-        except Exception as exc:       # backend down / connection refused
+        except Exception as exc:  # backend down / connection refused
             if probe:
                 return False
             self.send_error_json(502, f"backend unreachable at {url}: {exc}")
@@ -235,9 +250,11 @@ class ProxyHandler(BaseHTTPRequestHandler):
             status = getattr(resp, "status", 200) or 200
             ok = status not in (404, 405)
             if ok:
-                self._respond_payload(status, payload,
-                                      resp.headers.get("Content-Type",
-                                                       "application/json"))
+                self._respond_payload(
+                    status,
+                    payload,
+                    resp.headers.get("Content-Type", "application/json"),
+                )
             resp.close()
             return ok
         ctype = resp.headers.get("Content-Type", "")
@@ -250,7 +267,7 @@ class ProxyHandler(BaseHTTPRequestHandler):
                         break
                     self.wfile.write(line)
                     self.wfile.flush()
-            except Exception:          # pragma: no cover - client went away
+            except Exception:  # pragma: no cover - client went away
                 pass
             finally:
                 resp.close()
@@ -273,15 +290,25 @@ class ProxyHandler(BaseHTTPRequestHandler):
         created = int(time.time())
 
         def chunk(delta, finish=None):
-            obj = {"id": f"clm-{created}", "object": "chat.completion.chunk",
-                   "created": created, "model": model,
-                   "choices": [{"index": 0, "delta": delta,
-                                **({"finish_reason": finish} if finish else {})}]}
+            obj = {
+                "id": f"clm-{created}",
+                "object": "chat.completion.chunk",
+                "created": created,
+                "model": model,
+                "choices": [
+                    {
+                        "index": 0,
+                        "delta": delta,
+                        **({"finish_reason": finish} if finish else {}),
+                    }
+                ],
+            }
             self.wfile.write(f"data: {json.dumps(obj)}\n\n".encode())
             self.wfile.flush()
 
         chunk({"role": "assistant", "content": ""})
         import re
+
         pieces = re.findall(r"\S+\s?|\s+", reply) or ([reply] if reply else [])
         for piece in pieces:
             chunk({"content": piece})
@@ -297,29 +324,36 @@ class ProxyHandler(BaseHTTPRequestHandler):
 
     # -- static web studio ---------------------------------------------------
     def _serve_static(self, name: str):
-        fname = os.path.basename(name)         # no traversal
+        fname = os.path.basename(name)  # no traversal
         fp = os.path.join(STATIC_DIR, fname)
         if not os.path.isfile(fp):
             self.send_error_json(404, f"no static asset {fname!r}")
             return
-        ctype = MIME_TYPES.get(os.path.splitext(fname)[1],
-                               "application/octet-stream")
+        ctype = MIME_TYPES.get(os.path.splitext(fname)[1], "application/octet-stream")
         with open(fp, "rb") as f:
             payload = f.read()
         self._respond_payload(200, payload, ctype)
 
     def _static_route(self, path: str) -> bool:
         """Handle UI asset paths; False when the studio is disabled."""
-        ui_paths = ("", "/", "/index.html", "/style.css", "/app.js",
-                    "/favicon.svg", "/dyson.svg", "/dyson-done.svg", "/dyson.js")
+        ui_paths = (
+            "",
+            "/",
+            "/index.html",
+            "/style.css",
+            "/app.js",
+            "/favicon.svg",
+            "/dyson.svg",
+            "/dyson-done.svg",
+            "/dyson.js",
+        )
         if path not in ui_paths:
             return False
         cfg = self.supervisor.config
         if not cfg.ui_enabled:
             self.send_error_json(404, "web studio disabled (--no-ui)")
             return True
-        name = "index.html" if path in ("", "/", "/index.html") \
-            else path.lstrip("/")
+        name = "index.html" if path in ("", "/", "/index.html") else path.lstrip("/")
         self._serve_static(name)
         return True
 
@@ -331,8 +365,9 @@ class ProxyHandler(BaseHTTPRequestHandler):
         except Exception:
             return self.send_error_json(400, "invalid JSON-RPC body")
         from . import mcp as mcp_mod
+
         resp = mcp_mod.handle(self.supervisor, msg)
-        if resp is None:              # notification: accepted, no reply body
+        if resp is None:  # notification: accepted, no reply body
             self._respond_payload(202, b"", "application/json")
             return
         self.send_json(resp)
@@ -346,29 +381,46 @@ class ProxyHandler(BaseHTTPRequestHandler):
         if path in ("/health", "/v1/health"):
             with sup.lock:
                 sids = list(sup.sessions)
-            backends = {h.name: f"{h.host}:{h.port}"
-                        for h in sup.manager.handles if h.alive()}
-            self.send_json({"status": "ok", "version": VERSION,
-                            "model": cfg.served_model,
-                            "sessions": sids, "processes": backends,
-                            "ui": cfg.ui_enabled,
-                            "backend_ctx": cfg.backend_ctx,
-                            "workspace_root": sup.workspace_root})
+            backends = {
+                h.name: f"{h.host}:{h.port}" for h in sup.manager.handles if h.alive()
+            }
+            self.send_json(
+                {
+                    "status": "ok",
+                    "version": VERSION,
+                    "model": cfg.served_model,
+                    "sessions": sids,
+                    "processes": backends,
+                    "ui": cfg.ui_enabled,
+                    "backend_ctx": cfg.backend_ctx,
+                    "workspace_root": sup.workspace_root,
+                }
+            )
         elif path in ("/mcp", "/v1/mcp"):
-            self.send_json({"server": "clm-mem", "version": VERSION,
-                            "transport": "streamable-http",
-                            "hint": "POST JSON-RPC here "
-                                    "(initialize / tools/list / tools/call)"})
+            self.send_json(
+                {
+                    "server": "clm-mem",
+                    "version": VERSION,
+                    "transport": "streamable-http",
+                    "hint": "POST JSON-RPC here "
+                    "(initialize / tools/list / tools/call)",
+                }
+            )
         elif path == "/version":
-            self.send_json({"version": VERSION, "built_at": 0,
-                            "llama.cpp": {"version": f"clm-mem-{VERSION}"}})
+            self.send_json(
+                {
+                    "version": VERSION,
+                    "built_at": 0,
+                    "llama.cpp": {"version": f"clm-mem-{VERSION}"},
+                }
+            )
         elif path == "/v1/models":
             ids = [cfg.served_model]
             if cfg.backend_root:
                 try:
                     req = urllib.request.Request(
-                        f"{cfg.backend_root}/v1/models",
-                        headers=self._auth_header())
+                        f"{cfg.backend_root}/v1/models", headers=self._auth_header()
+                    )
                     with urllib.request.urlopen(req, timeout=5) as r:
                         data = json.loads(r.read().decode()).get("data", [])
                     for m in data:
@@ -376,10 +428,15 @@ class ProxyHandler(BaseHTTPRequestHandler):
                         if mid and mid not in ids:
                             ids.append(mid)
                 except Exception:
-                    pass        # offline is fine; served_model still listed
-            self.send_json({"object": "list",
-                            "data": [{"id": i, "object": "model",
-                                      "owned_by": "clm-mem"} for i in ids]})
+                    pass  # offline is fine; served_model still listed
+            self.send_json(
+                {
+                    "object": "list",
+                    "data": [
+                        {"id": i, "object": "model", "owned_by": "clm-mem"} for i in ids
+                    ],
+                }
+            )
         elif path.startswith("/v1/clm/"):
             self._clm_get(path)
         elif path in NATIVE_GET_PATHS and cfg.backend_root:
@@ -391,14 +448,14 @@ class ProxyHandler(BaseHTTPRequestHandler):
         sup = self.supervisor
         path = unquote(self.path.split("?")[0])
         if path.startswith("/v1/clm/sessions/"):
-            sid = path[len("/v1/clm/sessions/"):].rstrip("/")
+            sid = path[len("/v1/clm/sessions/") :].rstrip("/")
             existed = sup.drop_session(sid)
             if not existed:
                 self.send_error_json(404, f"unknown session {sid!r}")
             else:
                 self.send_json({"deleted": sid})
         elif path.startswith("/v1/clm/workspaces/"):
-            name = path[len("/v1/clm/workspaces/"):].rstrip("/")
+            name = path[len("/v1/clm/workspaces/") :].rstrip("/")
             try:
                 ok = sup.delete_workspace(name)
             except ValueError as exc:
@@ -429,22 +486,24 @@ class ProxyHandler(BaseHTTPRequestHandler):
             # llama.cpp fork serves /v1/systemone, Featherless both); probe
             # each path and relay the first response that is not a 404/405.
             aliases = [cfg.systemone_alias] if cfg.systemone_alias else []
-            aliases += [p for p in ("/v1/systemone", "/v1/classifier",
-                                    "/v1/decisions")
-                        if p not in aliases and p != path]
+            aliases += [
+                p
+                for p in ("/v1/systemone", "/v1/classifier", "/v1/decisions")
+                if p not in aliases and p != path
+            ]
             aliases.insert(aliases.index(path) if path in aliases else 0, path)
             # credential for the decision hop: explicit systemone key (or
             # $FEATHERLESS_API_KEY); fall back to the backend key only when
             # the decision server *is* the chat backend (fork passthrough),
             # and otherwise relay whatever the client brought.
-            auth = cfg.systemone_api_key or os.environ.get(
-                "FEATHERLESS_API_KEY", "")
+            auth = cfg.systemone_api_key or os.environ.get("FEATHERLESS_API_KEY", "")
             if not auth and target == cfg.backend_root:
                 auth = cfg.backend_api_key
             for alias in aliases:
-                if self._forward("POST", f"{target}{alias}", body,
-                                 probe=True, api_key=auth):
-                    cfg.systemone_alias = alias      # sticky for later calls
+                if self._forward(
+                    "POST", f"{target}{alias}", body, probe=True, api_key=auth
+                ):
+                    cfg.systemone_alias = alias  # sticky for later calls
                     return
             self.send_error_json(503, "no decision endpoint answered")
         if path.startswith("/v1/clm/"):
@@ -473,7 +532,7 @@ class ProxyHandler(BaseHTTPRequestHandler):
             if len(parts) == 3:
                 return self.send_json({"workspaces": sup.list_workspaces()})
             return self.send_error_json(404, f"no route for {path}")
-        if len(parts) == 3:                     # /v1/clm/sessions
+        if len(parts) == 3:  # /v1/clm/sessions
             with sup.lock:
                 sids = list(sup.sessions)
             return self.send_json({"sessions": sids})
@@ -483,9 +542,15 @@ class ProxyHandler(BaseHTTPRequestHandler):
         if action == "status":
             if h is None:
                 return self.send_error_json(404, f"unknown session {sid!r}")
-            return self.send_json({"session_id": sid, "status": h.status(),
-                                   "turns": h.turn, "tokens": h.tokens(),
-                                   "counts": h.counts()})
+            return self.send_json(
+                {
+                    "session_id": sid,
+                    "status": h.status(),
+                    "turns": h.turn,
+                    "tokens": h.tokens(),
+                    "counts": h.counts(),
+                }
+            )
         if action == "snapshot":
             if h is None:
                 return self.send_error_json(404, f"unknown session {sid!r}")
@@ -504,16 +569,17 @@ class ProxyHandler(BaseHTTPRequestHandler):
             except ValueError:
                 limit = 50
             hits = h.recall(query, limit=limit) if query else []
-            return self.send_json({"query": query, "hits": hits,
-                                   "archive_size": h.archive_size()})
+            return self.send_json(
+                {"query": query, "hits": hits, "archive_size": h.archive_size()}
+            )
         if action == "block" and len(parts) == 6 and parts[5].isdigit():
             if h is None:
                 return self.send_error_json(404, f"unknown session {sid!r}")
             b = h.block_by_id(int(parts[5]))
             if b is None:
-                return self.send_error_json(
-                    404, f"block {parts[5]} not in live window")
+                return self.send_error_json(404, f"block {parts[5]} not in live window")
             import dataclasses
+
             out = dataclasses.asdict(b)
             out["tokens"] = h.counter.count_block(b)
             return self.send_json({"session_id": sid, "block": out})
@@ -548,9 +614,11 @@ class ProxyHandler(BaseHTTPRequestHandler):
             ok = h.reinject(bid)
             if not ok:
                 return self.send_error_json(
-                    404, f"block {bid} not in archive for {sid!r}")
-            return self.send_json({"reinstated": True, "session_id": sid,
-                                   "status": h.status()})
+                    404, f"block {bid} not in archive for {sid!r}"
+                )
+            return self.send_json(
+                {"reinstated": True, "session_id": sid, "status": h.status()}
+            )
         if action == "settings":
             changed: Dict[str, object] = {}
             pct = body.get("shortterm_keep_pct")
@@ -560,7 +628,8 @@ class ProxyHandler(BaseHTTPRequestHandler):
                     assert 0.0 <= pct < 1.0
                 except (TypeError, ValueError, AssertionError):
                     return self.send_error_json(
-                        400, "shortterm_keep_pct must be in [0, 1)")
+                        400, "shortterm_keep_pct must be in [0, 1)"
+                    )
                 h.cfg.shortterm_keep_pct = pct
                 changed["shortterm_keep_pct"] = pct
             budget = body.get("max_context_tokens")
@@ -571,21 +640,29 @@ class ProxyHandler(BaseHTTPRequestHandler):
                     assert budget >= 64
                 except (TypeError, ValueError, AssertionError):
                     return self.send_error_json(
-                        400, "max_context_tokens must be an int >= 64")
+                        400, "max_context_tokens must be an int >= 64"
+                    )
                 # lockstep: llama.cpp fixes its window at load time, so the
                 # harness budget can only ever follow it, never exceed it.
                 bctx = sup.config.backend_ctx
                 if bctx and budget > bctx:
-                    note = (f"budget clamped to backend ctx {bctx} "
-                            f"(llama.cpp window is fixed at load)")
+                    note = (
+                        f"budget clamped to backend ctx {bctx} "
+                        f"(llama.cpp window is fixed at load)"
+                    )
                     budget = bctx
                 h.cfg.max_context_tokens = budget
                 changed["max_context_tokens"] = budget
             if note:
-                return self.send_json({"session_id": sid,
-                                       "changed": changed, "note": note,
-                                       "backend_ctx": sup.config.backend_ctx,
-                                       "status": h.status()})
+                return self.send_json(
+                    {
+                        "session_id": sid,
+                        "changed": changed,
+                        "note": note,
+                        "backend_ctx": sup.config.backend_ctx,
+                        "status": h.status(),
+                    }
+                )
             thr = body.get("systemone_evict_threshold")
             if thr is not None:
                 try:
@@ -593,7 +670,8 @@ class ProxyHandler(BaseHTTPRequestHandler):
                     assert 0.0 <= thr <= 1.0
                 except (TypeError, ValueError, AssertionError):
                     return self.send_error_json(
-                        400, "systemone_evict_threshold must be in [0, 1]")
+                        400, "systemone_evict_threshold must be in [0, 1]"
+                    )
                 h.cfg.systemone_evict_threshold = thr
                 changed["systemone_evict_threshold"] = thr
             # forgetting-strategy toggles (web studio / remote CLI)
@@ -601,12 +679,16 @@ class ProxyHandler(BaseHTTPRequestHandler):
                 v = body.get(k)
                 if v is None:
                     continue
-                val = v if isinstance(v, bool) else str(v).lower() in (
-                    "true", "1", "on", "yes")
+                val = (
+                    v
+                    if isinstance(v, bool)
+                    else str(v).lower() in ("true", "1", "on", "yes")
+                )
                 setattr(h.cfg, k, val)
                 changed[k] = val
-            return self.send_json({"session_id": sid,
-                                   "changed": changed, "status": h.status()})
+            return self.send_json(
+                {"session_id": sid, "changed": changed, "status": h.status()}
+            )
         return self.send_error_json(404, f"no route for {path}")
 
     # -- chat completions: passthrough or memory-managed ---------------------
@@ -622,12 +704,16 @@ class ProxyHandler(BaseHTTPRequestHandler):
         sid = self._session_id(body)
         model = body.get("model") or cfg.served_model
 
-        if not sid:                       # plain llama.cpp client: passthrough
+        if not sid:  # plain llama.cpp client: passthrough
             if not cfg.backend_root:
                 self.send_error_json(503, "no backend configured")
                 return
-            self._forward("POST", f"{cfg.backend_root}/v1/chat/completions",
-                          raw, stream=bool(body.get("stream")))
+            self._forward(
+                "POST",
+                f"{cfg.backend_root}/v1/chat/completions",
+                raw,
+                stream=bool(body.get("stream")),
+            )
             return
 
         msgs = body.get("messages") or []
@@ -635,9 +721,8 @@ class ProxyHandler(BaseHTTPRequestHandler):
         for m in reversed(msgs):
             if m.get("role") == "user":
                 c = m.get("content")
-                if isinstance(c, list):   # multimodal-ish parts
-                    c = " ".join(p.get("text", "") for p in c
-                                 if isinstance(p, dict))
+                if isinstance(c, list):  # multimodal-ish parts
+                    c = " ".join(p.get("text", "") for p in c if isinstance(p, dict))
                 user_text = str(c)
                 break
         if not user_text:
@@ -656,38 +741,50 @@ class ProxyHandler(BaseHTTPRequestHandler):
         if body.get("stream"):
             self._sse_reply(sid, model, reply)
             return
-        payload = {"id": "clm-mem-session", "object": "chat.completion",
-                   "created": int(time.time()), "model": model,
-                   "choices": [{"index": 0,
-                                "message": {"role": "assistant",
-                                            "content": reply},
-                                "finish_reason": "stop"}],
-                   "usage": {"prompt_tokens": harness.tokens(),
-                             "completion_tokens": max(1, len(reply) // 4),
-                             "total_tokens": harness.tokens()
-                             + max(1, len(reply) // 4)},
-                   "clm_mem": {"session_id": sid,
-                               "status": harness.status(),
-                               "counts": harness.counts(),
-                               "tokens": harness.tokens(),
-                               "budget": harness.cfg.max_context_tokens,
-                               "archive": harness.archive_size(),
-                               "events": harness.events[-8:]}}
+        payload = {
+            "id": "clm-mem-session",
+            "object": "chat.completion",
+            "created": int(time.time()),
+            "model": model,
+            "choices": [
+                {
+                    "index": 0,
+                    "message": {"role": "assistant", "content": reply},
+                    "finish_reason": "stop",
+                }
+            ],
+            "usage": {
+                "prompt_tokens": harness.tokens(),
+                "completion_tokens": max(1, len(reply) // 4),
+                "total_tokens": harness.tokens() + max(1, len(reply) // 4),
+            },
+            "clm_mem": {
+                "session_id": sid,
+                "status": harness.status(),
+                "counts": harness.counts(),
+                "tokens": harness.tokens(),
+                "budget": harness.cfg.max_context_tokens,
+                "archive": harness.archive_size(),
+                "events": harness.events[-8:],
+            },
+        }
         self.send_json(payload)
 
 
 class Supervisor:
     """The proxy process + whatever background backends it launched."""
 
-    def __init__(self, server: ThreadingHTTPServer,
-                 manager: ProcessManager, config: ProxyConfig):
+    def __init__(
+        self, server: ThreadingHTTPServer, manager: ProcessManager, config: ProxyConfig
+    ):
         self.server = server
         self.manager = manager
         self.config = config
         self.sessions: Dict[str, MemoryHarness] = {}
         self.lock = threading.Lock()
-        self.thread = threading.Thread(target=server.serve_forever,
-                                       daemon=True, name="clm-mem-proxy")
+        self.thread = threading.Thread(
+            target=server.serve_forever, daemon=True, name="clm-mem-proxy"
+        )
 
     @property
     def base_url(self) -> str:
@@ -696,11 +793,11 @@ class Supervisor:
         return f"http://{host}:{port}"
 
     @property
-    def public_base(self) -> str:          # OpenAI-style base for clients
+    def public_base(self) -> str:  # OpenAI-style base for clients
         return f"{self.base_url}/v1"
 
     @property
-    def ui_url(self) -> Optional[str]:     # web studio entry point (if enabled)
+    def ui_url(self) -> Optional[str]:  # web studio entry point (if enabled)
         return self.base_url if self.config.ui_enabled else None
 
     # -- sessions ---------------------------------------------------------
@@ -718,27 +815,30 @@ class Supervisor:
         cfg = self.config
         kwargs = dict(cfg.harness_kwargs or {})
         if sid.startswith(WS_PREFIX):
-            kwargs["workdir"] = self.ws_dir(sid[len(WS_PREFIX):])
+            kwargs["workdir"] = self.ws_dir(sid[len(WS_PREFIX) :])
             os.makedirs(kwargs["workdir"], exist_ok=True)
-        llm = OpenAIChat(base_url=f"{cfg.backend_root}/v1",
-                         model=model or cfg.served_model,
-                         api_key=cfg.backend_api_key or "EMPTY",
-                         temperature=cfg.chat_temperature,
-                         max_tokens=cfg.chat_max_tokens)
+        llm = OpenAIChat(
+            base_url=f"{cfg.backend_root}/v1",
+            model=model or cfg.served_model,
+            api_key=cfg.backend_api_key or "EMPTY",
+            temperature=cfg.chat_temperature,
+            max_tokens=cfg.chat_max_tokens,
+        )
         systemone = None
         if cfg.systemone_root:
             from .llm import SystemOneClient
+
             # fork passthrough: the decision server *is* the chat backend, so
             # a key configured for one authenticates both hops
             syskey = cfg.systemone_api_key or (
-                cfg.backend_api_key
-                if cfg.systemone_root == cfg.backend_root else "")
-            systemone = SystemOneClient(cfg.systemone_root,
-                                        model=cfg.systemone_model,
-                                        api_key=syskey)
+                cfg.backend_api_key if cfg.systemone_root == cfg.backend_root else ""
+            )
+            systemone = SystemOneClient(
+                cfg.systemone_root, model=cfg.systemone_model, api_key=syskey
+            )
         h = MemoryHarness(llm, HarnessConfig(**kwargs), systemone=systemone)
         with self.lock:
-            existing = self.sessions.get(sid)      # another thread raced us
+            existing = self.sessions.get(sid)  # another thread raced us
             if existing is not None:
                 return existing
             self.sessions[sid] = h
@@ -780,10 +880,15 @@ class Supervisor:
             h = self.get_session(sid)
             item: dict = {"name": n, "active": h is not None}
             if h is not None:
-                item.update({"turn": h.turn, "tokens": h.tokens(),
-                             "budget": h.cfg.max_context_tokens,
-                             "counts": h.counts(),
-                             "archive": h.archive_size()})
+                item.update(
+                    {
+                        "turn": h.turn,
+                        "tokens": h.tokens(),
+                        "budget": h.cfg.max_context_tokens,
+                        "counts": h.counts(),
+                        "archive": h.archive_size(),
+                    }
+                )
             out.append(item)
         return out
 
@@ -795,7 +900,7 @@ class Supervisor:
         d = self.ws_dir(name)
         self.drop_session(f"{WS_PREFIX}{name}")
         if os.path.isdir(d):
-            shutil.rmtree(d)          # sandbox teardown drops the files too
+            shutil.rmtree(d)  # sandbox teardown drops the files too
             return True
         return False
 
@@ -804,18 +909,19 @@ class Supervisor:
         deadline = time.time() + ready_timeout
         while time.time() < deadline:
             try:
-                with urllib.request.urlopen(f"{self.base_url}/health",
-                                            timeout=1.0) as resp:
+                with urllib.request.urlopen(
+                    f"{self.base_url}/health", timeout=1.0
+                ) as resp:
                     resp.read()
                     if resp.status < 500:
                         return self
             except Exception:
                 time.sleep(0.05)
         raise RuntimeError(
-            f"proxy did not become ready on {self.base_url} "
-            f"within {ready_timeout}s")
+            f"proxy did not become ready on {self.base_url} " f"within {ready_timeout}s"
+        )
 
-    def wait(self) -> None:               # pragma: no cover - CLI convenience
+    def wait(self) -> None:  # pragma: no cover - CLI convenience
         self.thread.join()
 
     def shutdown(self) -> None:
@@ -841,21 +947,29 @@ class Supervisor:
         return False
 
 
-def start_supervisor(*, public_host: str = "127.0.0.1", public_port: int = 0,
-                     served_model: str = "clm-mem-model",
-                     backend_mode: str = "mock", backend_cmd=None,
-                     backend_flags=("--host", "{host}", "--port", "{port}"),
-                     backend_url: Optional[str] = None,
-                     backend_api_key: str = "",
-                     systemone_mode: str = "mock", systemone_cmd=None,
-                     systemone_flags=("--host", "{host}", "--port", "{port}"),
-                     systemone_url: Optional[str] = None,
-                     systemone_model: str = "", systemone_api_key: str = "",
-                     harness_kwargs: Optional[dict] = None,
-                     chat_temperature: float = 0.6, chat_max_tokens: int = 1024,
-                     log_dir: Optional[str] = None, timeout: float = 90.0,
-                     ui: bool = True
-                     ) -> Supervisor:
+def start_supervisor(
+    *,
+    public_host: str = "127.0.0.1",
+    public_port: int = 0,
+    served_model: str = "clm-mem-model",
+    backend_mode: str = "mock",
+    backend_cmd=None,
+    backend_flags=("--host", "{host}", "--port", "{port}"),
+    backend_url: Optional[str] = None,
+    backend_api_key: str = "",
+    systemone_mode: str = "mock",
+    systemone_cmd=None,
+    systemone_flags=("--host", "{host}", "--port", "{port}"),
+    systemone_url: Optional[str] = None,
+    systemone_model: str = "",
+    systemone_api_key: str = "",
+    harness_kwargs: Optional[dict] = None,
+    chat_temperature: float = 0.6,
+    chat_max_tokens: int = 1024,
+    log_dir: Optional[str] = None,
+    timeout: float = 90.0,
+    ui: bool = True,
+) -> Supervisor:
     """Bring up the whole stack and return a running :class:`Supervisor`.
 
     Modes for backend/systemone are: ``mock`` (bundled fake), ``spawn``
@@ -867,7 +981,7 @@ def start_supervisor(*, public_host: str = "127.0.0.1", public_port: int = 0,
     OpenAI-compatible services; unset local servers ignore it.
     """
     manager = ProcessManager(log_dir=log_dir)
-    host = "127.0.0.1"                      # internal backends stay loopback
+    host = "127.0.0.1"  # internal backends stay loopback
 
     def spawn(kind: str, cmd, flags):
         """Start one backend from a command line.
@@ -884,15 +998,23 @@ def start_supervisor(*, public_host: str = "127.0.0.1", public_port: int = 0,
             argv = render_flags(argv, host, port)
         else:
             argv = render_flags(list(argv) + list(flags or ()), host, port)
-        h = manager.start(kind, argv, host=host, port=port,
-                          ready_paths=("/health", "/v1/models"),
-                          timeout=timeout)
+        h = manager.start(
+            kind,
+            argv,
+            host=host,
+            port=port,
+            ready_paths=("/health", "/v1/models"),
+            timeout=timeout,
+        )
         return h.root_url
 
     backend_root: Optional[str] = None
     if backend_mode == "mock":
-        backend_root = spawn("backend-mock",
-                             manager.mock_argv("llm"), ("--host", "{host}", "--port", "{port}"))
+        backend_root = spawn(
+            "backend-mock",
+            manager.mock_argv("llm"),
+            ("--host", "{host}", "--port", "{port}"),
+        )
     elif backend_mode == "spawn":
         if not backend_cmd:
             raise ValueError("backend_mode='spawn' needs backend_cmd")
@@ -908,8 +1030,11 @@ def start_supervisor(*, public_host: str = "127.0.0.1", public_port: int = 0,
 
     systemone_root: Optional[str] = None
     if systemone_mode == "mock":
-        systemone_root = spawn("systemone-mock",
-                               manager.mock_argv("systemone"), ("--host", "{host}", "--port", "{port}"))
+        systemone_root = spawn(
+            "systemone-mock",
+            manager.mock_argv("systemone"),
+            ("--host", "{host}", "--port", "{port}"),
+        )
     elif systemone_mode == "spawn":
         if not systemone_cmd:
             raise ValueError("systemone_mode='spawn' needs systemone_cmd")
@@ -919,7 +1044,7 @@ def start_supervisor(*, public_host: str = "127.0.0.1", public_port: int = 0,
             raise ValueError("systemone_mode='external' needs systemone_url")
         systemone_root = normalize_root(systemone_url)
     elif systemone_mode == "passthrough":
-        systemone_root = backend_root          # fork serves it itself
+        systemone_root = backend_root  # fork serves it itself
     elif systemone_mode in ("none", None):
         systemone_root = None
     else:
@@ -933,21 +1058,27 @@ def start_supervisor(*, public_host: str = "127.0.0.1", public_port: int = 0,
     backend_ctx: Optional[int] = None
     if backend_root:
         backend_ctx = discover_backend_ctx(
-            backend_root, timeout=5.0, api_key=backend_api_key)
+            backend_root, timeout=5.0, api_key=backend_api_key
+        )
     harness_kwargs = dict(harness_kwargs or {})
     if not harness_kwargs.get("max_context_tokens"):
         harness_kwargs["max_context_tokens"] = (
-            backend_ctx or HarnessConfig().max_context_tokens)
+            backend_ctx or HarnessConfig().max_context_tokens
+        )
 
     config = ProxyConfig(
-        backend_root=backend_root, backend_api_key=backend_api_key,
+        backend_root=backend_root,
+        backend_api_key=backend_api_key,
         systemone_root=systemone_root,
-        systemone_model=systemone_model, systemone_api_key=systemone_api_key,
+        systemone_model=systemone_model,
+        systemone_api_key=systemone_api_key,
         backend_ctx=backend_ctx,
         served_model=served_model,
         harness_kwargs=dict(harness_kwargs or {}),
-        chat_temperature=chat_temperature, chat_max_tokens=chat_max_tokens,
-        ui_enabled=bool(ui))
+        chat_temperature=chat_temperature,
+        chat_max_tokens=chat_max_tokens,
+        ui_enabled=bool(ui),
+    )
 
     try:
         server = ThreadingHTTPServer((public_host, public_port), ProxyHandler)
@@ -956,7 +1087,7 @@ def start_supervisor(*, public_host: str = "127.0.0.1", public_port: int = 0,
         raise
     server.daemon_threads = True
     sup = Supervisor(server, manager, config)
-    server.supervisor = sup                 # type: ignore[attr-defined]
+    server.supervisor = sup  # type: ignore[attr-defined]
     try:
         sup.start()
     except Exception:

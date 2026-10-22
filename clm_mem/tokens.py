@@ -1,4 +1,5 @@
 """Token counting: HuggingFace tokenizer when available, heuristic otherwise."""
+
 from __future__ import annotations
 import math
 from .blocks import Block
@@ -20,8 +21,10 @@ class TokenCounter:
         if tokenizer_name:
             try:
                 from transformers import AutoTokenizer  # optional dependency
+
                 self._tok = AutoTokenizer.from_pretrained(
-                    tokenizer_name, trust_remote_code=True)
+                    tokenizer_name, trust_remote_code=True
+                )
             except Exception:
                 self._tok = None
 
@@ -35,4 +38,4 @@ class TokenCounter:
         return max(1, math.ceil(len(text) / 3))
 
     def count_block(self, b: Block) -> int:
-        return self.count(b.content) + 4   # chatml-ish per-message overhead
+        return self.count(b.content) + 4  # chatml-ish per-message overhead

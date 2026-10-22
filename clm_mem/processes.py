@@ -5,6 +5,7 @@ one llama.cpp endpoint to clients while being 2-3 background processes.
 Nothing here downloads or compiles anything -- it only ever execs binaries or
 modules you point it at (or the bundled mocks).
 """
+
 from __future__ import annotations
 import json
 import os
@@ -66,11 +67,18 @@ class ProcessManager:
         self.handles: List[ProcessHandle] = []
 
     # -- launching --------------------------------------------------------
-    def start(self, name: str, argv: Sequence[str], *, host: str = "127.0.0.1",
-              port: Optional[int] = None,
-              ready_paths: Sequence[str] = ("/health", "/v1/models"),
-              timeout: float = 90.0, env: Optional[dict] = None,
-              cwd: Optional[str] = None) -> ProcessHandle:
+    def start(
+        self,
+        name: str,
+        argv: Sequence[str],
+        *,
+        host: str = "127.0.0.1",
+        port: Optional[int] = None,
+        ready_paths: Sequence[str] = ("/health", "/v1/models"),
+        timeout: float = 90.0,
+        env: Optional[dict] = None,
+        cwd: Optional[str] = None,
+    ) -> ProcessHandle:
         """Start one server process and poll until it answers over HTTP."""
         argv = list(argv)
         if port is None:
@@ -83,13 +91,15 @@ class ProcessManager:
         penv["CLM_MEM_HOST"] = host
         penv["CLM_MEM_PORT"] = str(port)
         try:
-            proc = subprocess.Popen(argv, stdout=fh,
-                                    stderr=subprocess.STDOUT, env=penv, cwd=cwd)
+            proc = subprocess.Popen(
+                argv, stdout=fh, stderr=subprocess.STDOUT, env=penv, cwd=cwd
+            )
         except Exception:
             fh.close()
             raise
-        handle = ProcessHandle(name=name, proc=proc, host=host, port=port,
-                               log_path=log_path, log_fh=fh)
+        handle = ProcessHandle(
+            name=name, proc=proc, host=host, port=port, log_path=log_path, log_fh=fh
+        )
         try:
             self._wait_ready(handle, ready_paths, timeout)
         except Exception:
@@ -98,15 +108,17 @@ class ProcessManager:
         self.handles.append(handle)
         return handle
 
-    def _wait_ready(self, h: ProcessHandle, paths: Sequence[str],
-                    timeout: float) -> None:
+    def _wait_ready(
+        self, h: ProcessHandle, paths: Sequence[str], timeout: float
+    ) -> None:
         deadline = time.time() + timeout
         last_err = ""
         while time.time() < deadline:
             if h.proc.poll() is not None:
                 raise RuntimeError(
                     f"{h.name} exited early (rc={h.proc.returncode}):\n"
-                    f"{_tail(h.log_path)}")
+                    f"{_tail(h.log_path)}"
+                )
             for path in paths:
                 url = f"{h.root_url}{path}"
                 try:
@@ -114,14 +126,15 @@ class ProcessManager:
                         if resp.status < 500:
                             resp.read()
                             return
-                except urllib.error.HTTPError as e:      # alive but 4xx = ready
+                except urllib.error.HTTPError as e:  # alive but 4xx = ready
                     return
                 except Exception as exc:
                     last_err = f"{url}: {exc}"
             time.sleep(0.15)
         raise RuntimeError(
             f"{h.name} did not become ready on {h.root_url} within "
-            f"{timeout}s (last: {last_err}):\n{_tail(h.log_path)}")
+            f"{timeout}s (last: {last_err}):\n{_tail(h.log_path)}"
+        )
 
     # -- shutdown -----------------------------------------------------------
     def _terminate(self, h: ProcessHandle) -> None:
@@ -130,7 +143,7 @@ class ProcessManager:
                 h.proc.send_signal(signal.SIGTERM)
         except Exception:
             pass
-        for _ in range(20):                      # up to ~2s graceful stop
+        for _ in range(20):  # up to ~2s graceful stop
             if h.proc.poll() is not None:
                 break
             time.sleep(0.1)
@@ -155,8 +168,7 @@ class ProcessManager:
     # -- convenience ---------------------------------------------------------
     def mock_argv(self, kind: str) -> List[str]:
         """Command line that runs one of the bundled mock backends."""
-        return [sys.executable, "-m", "clm_mem.mock_backends",
-                "--kind", kind]
+        return [sys.executable, "-m", "clm_mem.mock_backends", "--kind", kind]
 
     def __enter__(self):
         return self

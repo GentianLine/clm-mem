@@ -6,6 +6,7 @@ same behaviour: the model wraps durable content in ``<longterm>`` /
 ``<shortterm>`` while decoding, and a second cheap call re-labels anything it
 missed. No fine-tuning involved.
 """
+
 from __future__ import annotations
 import re
 from typing import List, Tuple
@@ -23,10 +24,11 @@ def split_tagged(text: str) -> List[Tuple[str, str]]:
     out: List[Tuple[str, str]] = []
     pos = 0
     for m in TAG_RE.finditer(text):
-        if text[pos:m.start()].strip():
-            out.append((TRANSIENT, text[pos:m.start()].strip()))
-        out.append((LONG if m.group(1).lower() == "longterm" else SHORT,
-                    m.group(2).strip()))
+        if text[pos : m.start()].strip():
+            out.append((TRANSIENT, text[pos : m.start()].strip()))
+        out.append(
+            (LONG if m.group(1).lower() == "longterm" else SHORT, m.group(2).strip())
+        )
         pos = m.end()
     if text[pos:].strip():
         out.append((TRANSIENT, text[pos:].strip()))

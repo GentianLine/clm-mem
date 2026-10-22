@@ -1,5 +1,6 @@
 """Harness configuration. All knobs live here; ``shortterm_keep_pct`` is the
 variable that controls how much short-term memory survives each FIFO round."""
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -11,19 +12,19 @@ DEFAULT_CTX_BUDGET = 8192
 @dataclass
 class HarnessConfig:
     # --- budget ---------------------------------------------------------
-    max_context_tokens: int = DEFAULT_CTX_BUDGET   # live-window token budget
+    max_context_tokens: int = DEFAULT_CTX_BUDGET  # live-window token budget
 
     # --- eviction policy --------------------------------------------------
-    shortterm_keep_pct: float = 0.5     # fraction of shortterm KEPT per FIFO round
-    keep_recent_turns: int = 2          # coherence window exempt from phase-1 eviction
-    offload_overflow: bool = True       # phase 3: longterm -> archive + pointer stub
+    shortterm_keep_pct: float = 0.5  # fraction of shortterm KEPT per FIFO round
+    keep_recent_turns: int = 2  # coherence window exempt from phase-1 eviction
+    offload_overflow: bool = True  # phase 3: longterm -> archive + pointer stub
 
     # --- classification (same model, no retraining) ------------------------
-    classify_mode: str = "both"         # inline | post | both
+    classify_mode: str = "both"  # inline | post | both
     classifier_max_block_chars: int = 400
-    classifier_max_tokens: int = 200    # generation cap for the router pass;
-                                       # keeps a slow local backend from
-                                       # rambling on the JSON label list
+    classifier_max_tokens: int = 200  # generation cap for the router pass;
+    # keeps a slow local backend from
+    # rambling on the JSON label list
 
     # --- SystemOne decision API --------------------------------------------
     systemone_evict_threshold: float = 0.7  # noul confidence needed to evict
@@ -33,21 +34,21 @@ class HarnessConfig:
     # Stale longterm demotes to shortterm (so phase-2 FIFO can pick it up) and
     # phase-3 offload ranks by value instead of strict age. Reheat on access.
     decay_enabled: bool = False
-    decay_half_life: int = 8        # turns for importance to halve without access
+    decay_half_life: int = 8  # turns for importance to halve without access
     demote_threshold: float = 0.45  # effective importance below which long -> short
-    reheat_boost: float = 0.15      # importance bump on access (capped at 1.0)
+    reheat_boost: float = 0.15  # importance bump on access (capped at 1.0)
     # Strategy 2: supersede -- updates and duplicates overwrite older longterm.
     # A new fact sharing a subject slot with an older one supersedes it; an
     # exact duplicate is dropped at write time instead of admitted twice.
     supersede_enabled: bool = False
-    supersede_fast: bool = False    # when True, a superseded block loses its
+    supersede_fast: bool = False  # when True, a superseded block loses its
     # importance immediately (forgotten fast); when False it keeps the value
     # it had and stays eligible for reheating until the decay curve demotes it
 
     # --- files / serving ----------------------------------------------------
-    workdir: str = "."                  # context.md / context.jsonl / archive.jsonl live here
-    tokenizer_name: str = ""            # HF tokenizer id for exact counts (optional)
-    memory_preamble: bool = True        # inject the CLM memory system prompt on first step
+    workdir: str = "."  # context.md / context.jsonl / archive.jsonl live here
+    tokenizer_name: str = ""  # HF tokenizer id for exact counts (optional)
+    memory_preamble: bool = True  # inject the CLM memory system prompt on first step
 
     def __post_init__(self) -> None:
         if not 0.0 <= self.shortterm_keep_pct < 1.0:

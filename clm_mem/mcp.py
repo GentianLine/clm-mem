@@ -7,6 +7,7 @@ clients: JSON-RPC over POST /mcp with ``initialize``, ``tools/list`` and
 MCP client (Unsloth Studio's integrations panel, Claude/Cline-style agents)
 gets identical long/short-term memory per workspace sandbox.
 """
+
 from __future__ import annotations
 import json
 from typing import Any, Dict, List, Optional
@@ -14,9 +15,11 @@ from typing import Any, Dict, List, Optional
 from .server import VERSION as SERVER_VERSION
 
 PROTOCOL_VERSION = "2025-06-18"
-SERVER_INFO = {"name": "clm-mem",
-               "title": "clm-mem memory harness",
-               "version": SERVER_VERSION}
+SERVER_INFO = {
+    "name": "clm-mem",
+    "title": "clm-mem memory harness",
+    "version": SERVER_VERSION,
+}
 
 _WS_DEFAULT = "default"
 
@@ -31,57 +34,106 @@ def _obj(props: Dict[str, Any], required: List[str]) -> Dict:
 
 
 _STR = {"type": "string"}
-_WS = {"type": "string",
-       "description": "workspace/project sandbox name (default: 'default')"}
+_WS = {
+    "type": "string",
+    "description": "workspace/project sandbox name (default: 'default')",
+}
 
 TOOLS: List[Dict] = [
-    {"name": "clm_chat",
-     "description": ("Send a message to the clm-mem memory-managed chat for a "
-                     "workspace. The harness classifies context as longterm / "
-                     "shortterm / transient and enforces the token budget."),
-     "inputSchema": _obj({"message": _STR, "workspace": _WS}, ["message"])},
-    {"name": "clm_status",
-     "description": ("Inspect a workspace session: turn count, live tokens vs "
-                     "budget, per-tier block counts, archive size."),
-     "inputSchema": _obj({"workspace": _WS}, [])},
-    {"name": "clm_blocks",
-     "description": ("List the live context blocks of a workspace session with "
-                     "their memory tags and token counts (previews unless "
-                     "full=true)."),
-     "inputSchema": _obj({"workspace": _WS,
-                          "tag": {"type": "string",
-                                  "enum": ["longterm", "shortterm",
-                                          "transient"]},
-                          "full": {"type": "boolean"}}, [])},
-    {"name": "clm_recall",
-     "description": ("Substring-search the eviction archive of a workspace -- "
-                     "memory that was dropped/offloaded is still retrievable."),
-     "inputSchema": _obj({"query": _STR, "workspace": _WS,
-                          "limit": {"type": "integer", "default": 50}},
-                         ["query"])},
-    {"name": "clm_reinject",
-     "description": ("Pull an archived block back into the live context of a "
-                     "workspace as shortterm."),
-     "inputSchema": _obj({"block_id": {"type": "integer"},
-                          "workspace": _WS}, ["block_id"])},
-    {"name": "clm_set_keep_pct",
-     "description": ("Tune the memory knob (fraction of shortterm kept per "
-                     "FIFO eviction round) live, in [0, 1)."),
-     "inputSchema": _obj({"pct": {"type": "number"}, "workspace": _WS},
-                         ["pct"])},
-    {"name": "clm_set_forget",
-     "description": ("Enable/disable the forgetting strategies live: decay "
-                     "(forgetting-curve demotion of stale longterm plus "
-                     "value-ranked offload) and supersede (updates overwrite "
-                     "older longterm, duplicates dropped at write time). "
-                     "Omitted flags leave the current state untouched."),
-     "inputSchema": _obj({"decay": {"type": "boolean"},
-                          "supersede": {"type": "boolean"}, "workspace": _WS},
-                         [])},
-    {"name": "clm_workspaces",
-     "description": ("List project workspaces (sandboxes) with their active "
-                     "session stats."),
-     "inputSchema": _obj({}, [])},
+    {
+        "name": "clm_chat",
+        "description": (
+            "Send a message to the clm-mem memory-managed chat for a "
+            "workspace. The harness classifies context as longterm / "
+            "shortterm / transient and enforces the token budget."
+        ),
+        "inputSchema": _obj({"message": _STR, "workspace": _WS}, ["message"]),
+    },
+    {
+        "name": "clm_status",
+        "description": (
+            "Inspect a workspace session: turn count, live tokens vs "
+            "budget, per-tier block counts, archive size."
+        ),
+        "inputSchema": _obj({"workspace": _WS}, []),
+    },
+    {
+        "name": "clm_blocks",
+        "description": (
+            "List the live context blocks of a workspace session with "
+            "their memory tags and token counts (previews unless "
+            "full=true)."
+        ),
+        "inputSchema": _obj(
+            {
+                "workspace": _WS,
+                "tag": {
+                    "type": "string",
+                    "enum": ["longterm", "shortterm", "transient"],
+                },
+                "full": {"type": "boolean"},
+            },
+            [],
+        ),
+    },
+    {
+        "name": "clm_recall",
+        "description": (
+            "Substring-search the eviction archive of a workspace -- "
+            "memory that was dropped/offloaded is still retrievable."
+        ),
+        "inputSchema": _obj(
+            {
+                "query": _STR,
+                "workspace": _WS,
+                "limit": {"type": "integer", "default": 50},
+            },
+            ["query"],
+        ),
+    },
+    {
+        "name": "clm_reinject",
+        "description": (
+            "Pull an archived block back into the live context of a "
+            "workspace as shortterm."
+        ),
+        "inputSchema": _obj(
+            {"block_id": {"type": "integer"}, "workspace": _WS}, ["block_id"]
+        ),
+    },
+    {
+        "name": "clm_set_keep_pct",
+        "description": (
+            "Tune the memory knob (fraction of shortterm kept per "
+            "FIFO eviction round) live, in [0, 1)."
+        ),
+        "inputSchema": _obj({"pct": {"type": "number"}, "workspace": _WS}, ["pct"]),
+    },
+    {
+        "name": "clm_set_forget",
+        "description": (
+            "Enable/disable the forgetting strategies live: decay "
+            "(forgetting-curve demotion of stale longterm plus "
+            "value-ranked offload) and supersede (updates overwrite "
+            "older longterm, duplicates dropped at write time). "
+            "Omitted flags leave the current state untouched."
+        ),
+        "inputSchema": _obj(
+            {
+                "decay": {"type": "boolean"},
+                "supersede": {"type": "boolean"},
+                "workspace": _WS,
+            },
+            [],
+        ),
+    },
+    {
+        "name": "clm_workspaces",
+        "description": (
+            "List project workspaces (sandboxes) with their active " "session stats."
+        ),
+        "inputSchema": _obj({}, []),
+    },
 ]
 
 
@@ -101,26 +153,27 @@ def _tool_result(sup, name: str, args: Dict[str, Any]) -> Dict:
             return _text(f"{reply}\n\n[context: {h.status()}]")
         if name == "clm_status":
             h = sup.harness_for(sid)
-            return _text(json.dumps(h.snapshot(preview_chars=0,
-                                               events_tail=5)))
+            return _text(json.dumps(h.snapshot(preview_chars=0, events_tail=5)))
         if name == "clm_blocks":
             h = sup.harness_for(sid)
             snap = h.snapshot(include_full=bool(args.get("full")))
             tag = args.get("tag")
             if tag:
-                snap["blocks"] = [b for b in snap["blocks"]
-                                  if b["tag"] == tag]
+                snap["blocks"] = [b for b in snap["blocks"] if b["tag"] == tag]
             return _text(json.dumps(snap))
         if name == "clm_recall":
             h = sup.harness_for(sid)
-            hits = h.recall(str(args.get("query", "")),
-                            limit=int(args.get("limit", 50)))
+            hits = h.recall(
+                str(args.get("query", "")), limit=int(args.get("limit", 50))
+            )
             return _text(json.dumps({"hits": hits}))
         if name == "clm_reinject":
             h = sup.harness_for(sid)
             ok = h.reinject(int(args.get("block_id", -1)))
-            return _text(("re-injected as shortterm" if ok else
-                          "block id not in archive"), is_error=not ok)
+            return _text(
+                ("re-injected as shortterm" if ok else "block id not in archive"),
+                is_error=not ok,
+            )
         if name == "clm_set_forget":
             h = sup.harness_for(sid)
             out = []
@@ -130,9 +183,11 @@ def _tool_result(sup, name: str, args: Dict[str, Any]) -> Dict:
             if "supersede" in args:
                 h.cfg.supersede_enabled = bool(args["supersede"])
                 out.append(f"supersede_enabled={h.cfg.supersede_enabled}")
-            return _text("; ".join(out) or
-                         f"decay_enabled={h.cfg.decay_enabled} "
-                         f"supersede_enabled={h.cfg.supersede_enabled}")
+            return _text(
+                "; ".join(out)
+                or f"decay_enabled={h.cfg.decay_enabled} "
+                f"supersede_enabled={h.cfg.supersede_enabled}"
+            )
         if name == "clm_set_keep_pct":
             pct = float(args.get("pct", -1))
             if not 0.0 <= pct < 1.0:
@@ -141,13 +196,12 @@ def _tool_result(sup, name: str, args: Dict[str, Any]) -> Dict:
             h.cfg.shortterm_keep_pct = pct
             return _text(f"shortterm_keep_pct = {pct}")
         return _text(f"unknown tool {name!r}", is_error=True)
-    except Exception as exc:      # MCP tools report failures via isError
+    except Exception as exc:  # MCP tools report failures via isError
         return _text(f"{name} failed: {exc}", is_error=True)
 
 
 def _err(rid, code: int, msg: str) -> Dict:
-    return {"jsonrpc": "2.0", "id": rid,
-            "error": {"code": code, "message": msg}}
+    return {"jsonrpc": "2.0", "id": rid, "error": {"code": code, "message": msg}}
 
 
 def handle(sup, msg: Dict[str, Any]) -> Optional[Dict]:
@@ -156,12 +210,17 @@ def handle(sup, msg: Dict[str, Any]) -> Optional[Dict]:
     method = str(msg.get("method", ""))
 
     if method == "initialize":
-        return {"jsonrpc": "2.0", "id": rid,
-                "result": {"protocolVersion": PROTOCOL_VERSION,
-                           "capabilities": {"tools": {}},
-                           "serverInfo": SERVER_INFO}}
+        return {
+            "jsonrpc": "2.0",
+            "id": rid,
+            "result": {
+                "protocolVersion": PROTOCOL_VERSION,
+                "capabilities": {"tools": {}},
+                "serverInfo": SERVER_INFO,
+            },
+        }
     if method in ("notifications/initialized", "initialized"):
-        return None                        # notification -> 202 no body
+        return None  # notification -> 202 no body
     if method == "ping":
         return {"jsonrpc": "2.0", "id": rid, "result": {}}
     if method == "tools/list":

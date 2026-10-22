@@ -1,6 +1,7 @@
 """End-to-end tests for the web studio API, MCP endpoint, workspace sandboxes
 and the remote attach client (`clm-mem chat --connect`). Mock backends only.
 """
+
 import json
 import os
 import urllib.error
@@ -37,13 +38,18 @@ HDR = {"X-Cllm-Mem-Session": "ws:proj"}
 @pytest.fixture()
 def sup(tmp_path):
     s = start_supervisor(
-        public_port=0, served_model="mock-model",
-        backend_mode="mock", systemone_mode="mock",
-        harness_kwargs={"workdir": str(tmp_path),
-                        "max_context_tokens": 600,
-                        # mock backstop noul sits at 0.6/0.85; allow eviction
-                        "systemone_evict_threshold": 0.5},
-        timeout=30)
+        public_port=0,
+        served_model="mock-model",
+        backend_mode="mock",
+        systemone_mode="mock",
+        harness_kwargs={
+            "workdir": str(tmp_path),
+            "max_context_tokens": 600,
+            # mock backstop noul sits at 0.6/0.85; allow eviction
+            "systemone_evict_threshold": 0.5,
+        },
+        timeout=30,
+    )
     yield s
     s.shutdown()
 
@@ -52,16 +58,27 @@ def sup(tmp_path):
 def test_ui_assets_served(sup):
     st, body = http_call(sup, "/")
     assert st == 200 and "clm-mem" in str(body)
-    for asset in ("/style.css", "/app.js", "/favicon.svg",
-                  "/dyson.svg", "/dyson-done.svg", "/dyson.js"):
+    for asset in (
+        "/style.css",
+        "/app.js",
+        "/favicon.svg",
+        "/dyson.svg",
+        "/dyson-done.svg",
+        "/dyson.js",
+    ):
         st, _ = http_call(sup, asset)
         assert st == 200
 
 
 def test_ui_disabled(tmp_path):
-    s = start_supervisor(public_port=0, backend_mode="none",
-                         systemone_mode="none", ui=False, timeout=30,
-                         harness_kwargs={"workdir": str(tmp_path)})
+    s = start_supervisor(
+        public_port=0,
+        backend_mode="none",
+        systemone_mode="none",
+        ui=False,
+        timeout=30,
+        harness_kwargs={"workdir": str(tmp_path)},
+    )
     try:
         st, body = http_call(s, "/")
         assert st == 404 and s.ui_url is None
@@ -81,9 +98,13 @@ def test_workspace_lifecycle(sup):
     assert len(d["workspaces"]) == 1
     assert d["workspaces"][0]["active"] is False
 
-    http_call(sup, "/v1/chat/completions", "POST",
-              {"messages": [{"role": "user",
-                             "content": "Remember: key KEY-7 port 8077"}]}, HDR)
+    http_call(
+        sup,
+        "/v1/chat/completions",
+        "POST",
+        {"messages": [{"role": "user", "content": "Remember: key KEY-7 port 8077"}]},
+        HDR,
+    )
     st, d = http_call(sup, "/v1/clm/workspaces")
     w = d["workspaces"][0]
     assert w["active"] and w["turn"] == 1 and w["counts"]["longterm"] >= 1
@@ -105,32 +126,40 @@ def test_workspace_name_validation(sup):
 
 # -- snapshot / blocks / archive / settings ------------------------------------
 def test_snapshot_block_archive_reinject_settings(sup):
-    big = "z" * 800                       # longer than the 320-char preview
-    http_call(sup, "/v1/chat/completions", "POST",
-              {"messages": [{"role": "user",
-                             "content": f"Remember: id VAULT-9 {big}"}]}, HDR)
+    big = "z" * 800  # longer than the 320-char preview
+    http_call(
+        sup,
+        "/v1/chat/completions",
+        "POST",
+        {"messages": [{"role": "user", "content": f"Remember: id VAULT-9 {big}"}]},
+        HDR,
+    )
 
     st, snap = http_call(sup, "/v1/clm/sessions/ws%3Aproj/snapshot")
     assert st == 200 and snap["turn"] == 1
-    long_ones = [b for b in snap["blocks"] if b["tag"] == "longterm"
-                 and b["role"] == "user"]
+    long_ones = [
+        b for b in snap["blocks"] if b["tag"] == "longterm" and b["role"] == "user"
+    ]
     assert any(b["truncated"] and len(b["content"]) == 320 for b in long_ones)
 
-    bid = next(b["id"] for b in snap["blocks"]
-               if b["truncated"] and b["role"] == "user")
+    bid = next(
+        b["id"] for b in snap["blocks"] if b["truncated"] and b["role"] == "user"
+    )
     st, full = http_call(sup, f"/v1/clm/sessions/ws%3Aproj/block/{bid}")
     assert st == 200 and len(full["block"]["content"]) > 700
 
     # settings round-trip
-    st, d = http_call(sup, "/v1/clm/sessions/ws%3Aproj/settings", "POST",
-                      {"shortterm_keep_pct": 0.8})
+    st, d = http_call(
+        sup, "/v1/clm/sessions/ws%3Aproj/settings", "POST", {"shortterm_keep_pct": 0.8}
+    )
     assert st == 200 and d["changed"]["shortterm_keep_pct"] == 0.8
     st, snap = http_call(sup, "/v1/clm/sessions/ws%3Aproj/snapshot")
     assert snap["shortterm_keep_pct"] == 0.8
 
     # bad settings
-    st, _ = http_call(sup, "/v1/clm/sessions/ws%3Aproj/settings", "POST",
-                      {"shortterm_keep_pct": 7})
+    st, _ = http_call(
+        sup, "/v1/clm/sessions/ws%3Aproj/settings", "POST", {"shortterm_keep_pct": 7}
+    )
     assert st == 400
 
 
@@ -138,27 +167,35 @@ def test_archive_search_and_reinject_flow(sup):
     filler = "chatter filler that eats tokens " * 20
     hdr = {"X-Cllm-Mem-Session": "ws:s2"}
     for i in range(6):
-        http_call(sup, "/v1/chat/completions", "POST",
-                  {"messages": [{"role": "user",
-                                 "content": f"Quick note {i}: {filler}"}]}, hdr)
+        http_call(
+            sup,
+            "/v1/chat/completions",
+            "POST",
+            {"messages": [{"role": "user", "content": f"Quick note {i}: {filler}"}]},
+            hdr,
+        )
     st, d = http_call(sup, "/v1/clm/sessions/ws%3As2/archive?q=chatter&limit=5")
     assert st == 200 and len(d["hits"]) >= 1
     bid = d["hits"][0]["id"]
 
-    st, r = http_call(sup, "/v1/clm/sessions/ws%3As2/reinject", "POST",
-                      {"block_id": bid})
+    st, r = http_call(
+        sup, "/v1/clm/sessions/ws%3As2/reinject", "POST", {"block_id": bid}
+    )
     assert st == 200 and r["reinstated"]
 
     # reinject of unknown id -> 404
-    st, _ = http_call(sup, "/v1/clm/sessions/ws%3As2/reinject", "POST",
-                      {"block_id": 99999})
+    st, _ = http_call(
+        sup, "/v1/clm/sessions/ws%3As2/reinject", "POST", {"block_id": 99999}
+    )
     assert st == 404
 
 
 def test_unknown_session_404s(sup):
-    for path in ("/v1/clm/sessions/nobody/snapshot",
-                 "/v1/clm/sessions/nobody/archive?q=x",
-                 "/v1/clm/sessions/nobody/reinject"):
+    for path in (
+        "/v1/clm/sessions/nobody/snapshot",
+        "/v1/clm/sessions/nobody/archive?q=x",
+        "/v1/clm/sessions/nobody/reinject",
+    ):
         method = "GET" if "reinject" not in path else "POST"
         st, _ = http_call(sup, path, method, {} if method == "POST" else None)
         assert st == 404
@@ -170,8 +207,9 @@ def mcp_call(sup, msg):
 
 
 def test_mcp_initialize_and_tools(sup):
-    st, init = mcp_call(sup, {"jsonrpc": "2.0", "id": 1, "method": "initialize",
-                              "params": {}})
+    st, init = mcp_call(
+        sup, {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}}
+    )
     assert st == 200 and init["result"]["serverInfo"]["name"] == "clm-mem"
     assert "protocolVersion" in init["result"]
 
@@ -179,17 +217,28 @@ def test_mcp_initialize_and_tools(sup):
     names = {t["name"] for t in lst["result"]["tools"]}
     assert {"clm_chat", "clm_recall", "clm_workspaces"} <= names
 
-    st, resp = mcp_call(sup, {"jsonrpc": "2.0", "id": 3,
-                              "method": "bogus"})       # notification-ish
+    st, resp = mcp_call(
+        sup, {"jsonrpc": "2.0", "id": 3, "method": "bogus"}
+    )  # notification-ish
     assert st == 200 and resp["error"]["code"] == -32601
 
 
 def test_mcp_tool_calls_drive_same_library(sup):
-    st, r = mcp_call(sup, {"jsonrpc": "2.0", "id": 4, "method": "tools/call",
-                           "params": {"name": "clm_chat",
-                                      "arguments": {"message":
-                                        "Remember: MCP fact ZQ-3 port 8093",
-                                        "workspace": "mcpw"}}})
+    st, r = mcp_call(
+        sup,
+        {
+            "jsonrpc": "2.0",
+            "id": 4,
+            "method": "tools/call",
+            "params": {
+                "name": "clm_chat",
+                "arguments": {
+                    "message": "Remember: MCP fact ZQ-3 port 8093",
+                    "workspace": "mcpw",
+                },
+            },
+        },
+    )
     assert st == 200 and r["result"]["isError"] is False
     assert r["result"]["content"][0]["text"].strip()
 
@@ -197,15 +246,29 @@ def test_mcp_tool_calls_drive_same_library(sup):
     st, snap = http_call(sup, "/v1/clm/sessions/ws%3Amcpw/snapshot")
     assert st == 200 and snap["turn"] == 1
 
-    st, r = mcp_call(sup, {"jsonrpc": "2.0", "id": 5, "method": "tools/call",
-                           "params": {"name": "clm_status",
-                                      "arguments": {"workspace": "mcpw"}}})
+    st, r = mcp_call(
+        sup,
+        {
+            "jsonrpc": "2.0",
+            "id": 5,
+            "method": "tools/call",
+            "params": {"name": "clm_status", "arguments": {"workspace": "mcpw"}},
+        },
+    )
     assert json.loads(r["result"]["content"][0]["text"])["turn"] == 1
 
-    st, r = mcp_call(sup, {"jsonrpc": "2.0", "id": 6, "method": "tools/call",
-                           "params": {"name": "clm_set_keep_pct",
-                                      "arguments": {"pct": 0.9,
-                                                    "workspace": "mcpw"}}})
+    st, r = mcp_call(
+        sup,
+        {
+            "jsonrpc": "2.0",
+            "id": 6,
+            "method": "tools/call",
+            "params": {
+                "name": "clm_set_keep_pct",
+                "arguments": {"pct": 0.9, "workspace": "mcpw"},
+            },
+        },
+    )
     assert r["result"]["isError"] is False
 
     st, snap = http_call(sup, "/v1/clm/sessions/ws%3Amcpw/snapshot")
@@ -213,14 +276,14 @@ def test_mcp_tool_calls_drive_same_library(sup):
 
 
 def test_mcp_notification_accepted_202(sup):
-    st, _ = mcp_call(sup, {"jsonrpc": "2.0",
-                           "method": "notifications/initialized"})
+    st, _ = mcp_call(sup, {"jsonrpc": "2.0", "method": "notifications/initialized"})
     assert st == 202
 
 
 # -- remote attach client ------------------------------------------------------
 def test_remote_harness_matches_server(sup):
     from clm_mem.remote import connect
+
     h = connect(f"{sup.public_base}", workspace="remote")
     reply = h.step("Remember: remote fact RK-1 port 8051")
     assert reply
@@ -244,6 +307,7 @@ def test_remote_harness_matches_server(sup):
 
 def test_remote_step_header_used(sup):
     from clm_mem.remote import RemoteHarness
+
     h = RemoteHarness(f"{sup.public_base}", session="ws:hdrcheck")
     h.step("hello there")
     st, lst = http_call(sup, "/v1/clm/sessions")
@@ -252,19 +316,29 @@ def test_remote_step_header_used(sup):
 
 # -- forgetting-strategy toggles (CLI flags ride the same settings route) ------
 def test_settings_forget_toggles(sup):
-    http_call(sup, "/v1/chat/completions", "POST",
-              {"messages": [{"role": "user", "content": "hi there"}]}, HDR)
+    http_call(
+        sup,
+        "/v1/chat/completions",
+        "POST",
+        {"messages": [{"role": "user", "content": "hi there"}]},
+        HDR,
+    )
 
     st, snap = http_call(sup, "/v1/clm/sessions/ws%3Aproj/snapshot")
     assert snap["decay_enabled"] is False and snap["supersede_enabled"] is False
 
-    st, d = http_call(sup, "/v1/clm/sessions/ws%3Aproj/settings", "POST",
-                      {"decay_enabled": True})
+    st, d = http_call(
+        sup, "/v1/clm/sessions/ws%3Aproj/settings", "POST", {"decay_enabled": True}
+    )
     assert st == 200 and d["changed"]["decay_enabled"] is True
 
     # stringy truthy/falsey accepted (coerced like other knobs)
-    st, d = http_call(sup, "/v1/clm/sessions/ws%3Aproj/settings", "POST",
-                      {"supersede_enabled": "on", "decay_enabled": "false"})
+    st, d = http_call(
+        sup,
+        "/v1/clm/sessions/ws%3Aproj/settings",
+        "POST",
+        {"supersede_enabled": "on", "decay_enabled": "false"},
+    )
     assert d["changed"]["supersede_enabled"] is True
     assert d["changed"]["decay_enabled"] is False
 
@@ -273,25 +347,37 @@ def test_settings_forget_toggles(sup):
 
 
 def test_mcp_set_forget_tool(sup):
-    st, lst = mcp_call(sup, {"jsonrpc": "2.0", "id": 2,
-                             "method": "tools/list"})
+    st, lst = mcp_call(sup, {"jsonrpc": "2.0", "id": 2, "method": "tools/list"})
     names = {t["name"] for t in lst["result"]["tools"]}
     assert "clm_set_forget" in names
 
-    st, r = mcp_call(sup, {"jsonrpc": "2.0", "id": 7, "method": "tools/call",
-                           "params": {"name": "clm_set_forget",
-                                      "arguments": {"workspace": "fgw",
-                                                   "decay": True,
-                                                   "supersede": True}}})
+    st, r = mcp_call(
+        sup,
+        {
+            "jsonrpc": "2.0",
+            "id": 7,
+            "method": "tools/call",
+            "params": {
+                "name": "clm_set_forget",
+                "arguments": {"workspace": "fgw", "decay": True, "supersede": True},
+            },
+        },
+    )
     assert st == 200 and r["result"]["isError"] is False
 
     st, snap = http_call(sup, "/v1/clm/sessions/ws%3Afgw/snapshot")
     assert snap["decay_enabled"] is True and snap["supersede_enabled"] is True
 
     # omitted flags read back current state instead of changing it
-    st, r = mcp_call(sup, {"jsonrpc": "2.0", "id": 8, "method": "tools/call",
-                           "params": {"name": "clm_set_forget",
-                                      "arguments": {"workspace": "fgw"}}})
+    st, r = mcp_call(
+        sup,
+        {
+            "jsonrpc": "2.0",
+            "id": 8,
+            "method": "tools/call",
+            "params": {"name": "clm_set_forget", "arguments": {"workspace": "fgw"}},
+        },
+    )
     text = r["result"]["content"][0]["text"]
     assert "decay_enabled=True" in text and "supersede_enabled=True" in text
 
@@ -299,10 +385,11 @@ def test_mcp_set_forget_tool(sup):
 def test_remote_cfg_forget_toggles(sup):
     """The remote attach client exposes the same toggles as local.cfg."""
     from clm_mem.remote import RemoteHarness
+
     h = RemoteHarness(f"{sup.public_base}", session="ws:remfg")
-    h.step("hello there")                      # creates the session
+    h.step("hello there")  # creates the session
     h.prime()
     assert h.cfg.decay_enabled is False and h.cfg.supersede_enabled is False
-    h.cfg.decay_enabled = True                 # pushed via /settings
+    h.cfg.decay_enabled = True  # pushed via /settings
     st, snap = http_call(sup, "/v1/clm/sessions/ws%3Aremfg/snapshot")
     assert snap["decay_enabled"] is True

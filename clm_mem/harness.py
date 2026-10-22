@@ -1,4 +1,5 @@
 """The memory harness: context-as-a-file mirror + three-phase eviction engine."""
+
 from __future__ import annotations
 import dataclasses
 import json
@@ -19,11 +20,19 @@ BASE_IMPORTANCE = {LONG: 1.0, SHORT: 0.6, TRANSIENT: 0.3}
 SLOT_RE = re.compile(
     r"\b(codename|password|secret|token|api[_-]?key|version|port)\b"
     r"(?:[\s:=]{0,3}(?:(?:is|are|were|was|set|to|named|called)[\s:=]+)*?)"
-    r"([A-Za-z0-9]+(?:[-_.][A-Za-z0-9]+)*)", re.I)
+    r"([A-Za-z0-9]+(?:[-_.][A-Za-z0-9]+)*)",
+    re.I,
+)
 #: Free-standing versioned identifiers (``Nova-7``) usable for reheating.
 ID_RE = re.compile(r"\b([A-Za-z][A-Za-z+]+-\d+)\b")
 from .config import HarnessConfig
-from .tagging import CLASSIFIER_SYSTEM, MEMORY_PREAMBLE, TAG_RE, split_tagged, strip_tags
+from .tagging import (
+    CLASSIFIER_SYSTEM,
+    MEMORY_PREAMBLE,
+    TAG_RE,
+    split_tagged,
+    strip_tags,
+)
 from .tokens import TokenCounter
 
 
@@ -39,8 +48,7 @@ class MemoryHarness:
       5. evict again, then mirror the window to ``context.md`` / ``context.jsonl``.
     """
 
-    def __init__(self, llm, cfg: Optional[HarnessConfig] = None,
-                 systemone=None):
+    def __init__(self, llm, cfg: Optional[HarnessConfig] = None, systemone=None):
         """
         Args:
             llm: Chat backend with chat(messages) -> str method.
@@ -84,19 +92,25 @@ class MemoryHarness:
         evict-phase1/2/3, backstop-*, classify, warn.
         """
         self._seq += 1
-        return {"seq": self._seq, "t": time.time(),
-                "kind": kind, "text": text}
+        return {"seq": self._seq, "t": time.time(), "kind": kind, "text": text}
 
     def _event(self, kind: str, text: str) -> None:
         self.events.append(self._mk(kind, text))
 
     # -- basic ops ----------------------------------------------------------
-    def add(self, role: str, content: str, tag: str = TRANSIENT,
-            pinned: bool = False) -> Block:
-        b = Block(id=self._next_id, role=role, content=content.strip(),
-                  tag=tag, turn=self.turn, pinned=pinned,
-                  importance=BASE_IMPORTANCE.get(tag, 0.3),
-                  last_access=self.turn)
+    def add(
+        self, role: str, content: str, tag: str = TRANSIENT, pinned: bool = False
+    ) -> Block:
+        b = Block(
+            id=self._next_id,
+            role=role,
+            content=content.strip(),
+            tag=tag,
+            turn=self.turn,
+            pinned=pinned,
+            importance=BASE_IMPORTANCE.get(tag, 0.3),
+            last_access=self.turn,
+        )
         self._next_id += 1
         self.blocks.append(b)
         return b
@@ -126,11 +140,17 @@ class MemoryHarness:
         """
         if self.cfg.classify_mode not in ("post", "both"):
             return
-        if not force and any(b.tag in (LONG, SHORT) for b in self.blocks
-                             if b.turn == self.turn and b.role == "assistant"):
+        if not force and any(
+            b.tag in (LONG, SHORT)
+            for b in self.blocks
+            if b.turn == self.turn and b.role == "assistant"
+        ):
             return  # inline tagging succeeded this turn; nothing to re-route
-        cands = [b for b in self.blocks
-                 if not b.pinned and b.turn == self.turn and b.tag == TRANSIENT]
+        cands = [
+            b
+            for b in self.blocks
+            if not b.pinned and b.turn == self.turn and b.tag == TRANSIENT
+        ]
         if not cands:
             return
 
@@ -146,16 +166,20 @@ class MemoryHarness:
         lines = "\n".join(
             f"id={b.id} role={b.role} text="
             f"{b.content[:self.cfg.classifier_max_block_chars]}"
-            for b in cands)
+            for b in cands
+        )
         try:
             raw = self.llm.chat(
-                [{"role": "system", "content": CLASSIFIER_SYSTEM},
-                 {"role": "user", "content": f"Conversation blocks:\n{lines}"}],
-                temperature=0.0, max_tokens=self.cfg.classifier_max_tokens)
-            data = json.loads(raw[raw.index("{"): raw.rindex("}") + 1])
+                [
+                    {"role": "system", "content": CLASSIFIER_SYSTEM},
+                    {"role": "user", "content": f"Conversation blocks:\n{lines}"},
+                ],
+                temperature=0.0,
+                max_tokens=self.cfg.classifier_max_tokens,
+            )
+            data = json.loads(raw[raw.index("{") : raw.rindex("}") + 1])
         except (ValueError, KeyError):
-            self._event("classify",
-                        "unparseable router response; kept transient")
+            self._event("classify", "unparseable router response; kept transient")
             return
         by_id = {b.id: b for b in self.blocks}
         for lab in data.get("labels", []):
@@ -176,12 +200,13 @@ class MemoryHarness:
                 "criteria": {
                     LONG: "Durable facts, decisions, IDs, specs, credentials, requirements likely needed much later",
                     SHORT: "Working state, intermediate reasoning, recent task output useful for a while but not forever",
-                    TRANSIENT: "Pleasantries, filler, redundant restatement, small talk, ephemeral chatter"
-                }
+                    TRANSIENT: "Pleasantries, filler, redundant restatement, small talk, ephemeral chatter",
+                },
             }
 
         resp = self.systemone.system_one(
-            {"blocks": [b.content for b in cands]}, questions)
+            {"blocks": [b.content for b in cands]}, questions
+        )
 
         by_id = {b.id: b for b in self.blocks}
         for b in cands:
@@ -191,8 +216,9 @@ class MemoryHarness:
                 old_tag = by_id[b.id].tag
                 if old_tag != choice:
                     self._retag(by_id[b.id], choice)
-                    self._event("classify",
-                                f"reclassified #{b.id}: {old_tag} -> {choice}")
+                    self._event(
+                        "classify", f"reclassified #{b.id}: {old_tag} -> {choice}"
+                    )
 
     # -- forgetting strategies (phase-0 maintenance) --------------------------
     # Two opt-in passes that attack longterm saturation from complementary
@@ -243,29 +269,38 @@ class MemoryHarness:
             eff = self.eff_importance(b)
             if eff < self.cfg.demote_threshold:
                 self._retag(b, SHORT)
-                log.append(self._mk(
-                    "maintain-decay",
-                    f"demoted longterm #{b.id} -> shortterm "
-                    f"(eff={eff:.2f} stale {self.turn - b.last_access} turns)"))
+                log.append(
+                    self._mk(
+                        "maintain-decay",
+                        f"demoted longterm #{b.id} -> shortterm "
+                        f"(eff={eff:.2f} stale {self.turn - b.last_access} turns)",
+                    )
+                )
 
     def _supersede_pass(self, log: List[Dict]) -> None:
         """Updates overwrite: a new long fact sharing a subject slot with an
         older live long fact supersedes it (old demotes and is labelled);
         an exact duplicate is dropped at write time instead of admitted."""
-        fresh = [b for b in self.blocks
-                 if b.tag == LONG and not b.pinned and b.turn == self.turn]
+        fresh = [
+            b
+            for b in self.blocks
+            if b.tag == LONG and not b.pinned and b.turn == self.turn
+        ]
         if not fresh:
             return
         # Candidates include demoted/superseded blocks: a restatement of a
         # fact that already lost its long tag is still a duplicate write.
-        older = [(o, MemoryHarness._slots(o.content)) for o in self.blocks
-                 if not o.pinned and o.turn < self.turn]
+        older = [
+            (o, MemoryHarness._slots(o.content))
+            for o in self.blocks
+            if not o.pinned and o.turn < self.turn
+        ]
         for new in fresh:
             nslots = MemoryHarness._slots(new.content)
             if not nslots:
                 continue
             dup_of = None
-            hits: List[tuple] = []          # (old block, shared slot names)
+            hits: List[tuple] = []  # (old block, shared slot names)
             for old, oslots in older:
                 shared = sorted(set(nslots) & set(oslots))
                 if not shared:
@@ -281,10 +316,13 @@ class MemoryHarness:
                 # still recallable), and reheat the survivor as touched.
                 dup_of.last_access = self.turn
                 self._drop([new])
-                log.append(self._mk(
-                    "maintain-dedup",
-                    f"dropped duplicate longterm #{new.id} "
-                    f"(same value as #{dup_of.id})"))
+                log.append(
+                    self._mk(
+                        "maintain-dedup",
+                        f"dropped duplicate longterm #{new.id} "
+                        f"(same value as #{dup_of.id})",
+                    )
+                )
                 continue
             for old, shared in hits:
                 old.last_access = self.turn
@@ -296,10 +334,13 @@ class MemoryHarness:
                     # forgotten fast: a contradicted fact loses its value at
                     # once instead of riding the decay curve down
                     old.importance = min(0.3, old.importance)
-                log.append(self._mk(
-                    "maintain-supersede",
-                    f"longterm #{old.id} superseded by new #{new.id} "
-                    f"(slots: {', '.join(shared)})"))
+                log.append(
+                    self._mk(
+                        "maintain-supersede",
+                        f"longterm #{old.id} superseded by new #{new.id} "
+                        f"(slots: {', '.join(shared)})",
+                    )
+                )
 
     # -- eviction engine ------------------------------------------------------
     def evict(self) -> List[str]:
@@ -320,27 +361,32 @@ class MemoryHarness:
         self._maintain(log)
 
         if not self.over_budget():
-            self.events.extend(log)      # maintenance events still surface
+            self.events.extend(log)  # maintenance events still surface
             return log
 
         # Phase 1 -- delete everything that is neither longterm nor shortterm.
         min_turn = max(0, self.turn - self.cfg.keep_recent_turns + 1)
-        doomed = [b for b in self.blocks
-                  if b.tag == TRANSIENT and not b.pinned and b.turn < min_turn]
+        doomed = [
+            b
+            for b in self.blocks
+            if b.tag == TRANSIENT and not b.pinned and b.turn < min_turn
+        ]
         if doomed:
             # Backstop: ask SystemOne before clearing memory (batched)
             if self.systemone:
                 doomed = self._backstop_eviction(doomed, "phase1", log)
             self._drop(doomed)
-            log.append(self._mk("evict-phase1",
-                                f"deleted {len(doomed)} transient block(s)"))
+            log.append(
+                self._mk("evict-phase1", f"deleted {len(doomed)} transient block(s)")
+            )
 
         # Phase 2 -- shortterm FIFO, keeping `shortterm_keep_pct` per round.
         phase2_rounds = 0
         while self.over_budget() and phase2_rounds < 10:  # prevent infinite loop
             phase2_rounds += 1
-            shorts = sorted((b for b in self.blocks if b.tag == SHORT),
-                            key=lambda b: b.id)
+            shorts = sorted(
+                (b for b in self.blocks if b.tag == SHORT), key=lambda b: b.id
+            )
             if not shorts:
                 break
             keep_n = math.floor(len(shorts) * self.cfg.shortterm_keep_pct)
@@ -351,10 +397,13 @@ class MemoryHarness:
             if not drop:
                 break  # backstop kept everything; can't make progress
             self._drop(drop)
-            log.append(self._mk(
-                "evict-phase2",
-                f"FIFO-evicted {len(drop)} of {len(shorts)} shortterm "
-                f"(kept newest {self.cfg.shortterm_keep_pct:.0%})"))
+            log.append(
+                self._mk(
+                    "evict-phase2",
+                    f"FIFO-evicted {len(drop)} of {len(shorts)} shortterm "
+                    f"(kept newest {self.cfg.shortterm_keep_pct:.0%})",
+                )
+            )
 
         # Phase 3 -- longterm overflow: offload, leave a pointer. Strict FIFO
         # (oldest first) unless decay is on, in which case the weakest live
@@ -371,25 +420,32 @@ class MemoryHarness:
                 if self.systemone:
                     try:
                         if not self.systemone.should_evict(b.content):
-                            log.append(self._mk(
-                                "backstop-phase3",
-                                f"kept longterm #{b.id}"))
+                            log.append(
+                                self._mk("backstop-phase3", f"kept longterm #{b.id}")
+                            )
                             continue  # skip this one, try next
                     except RuntimeError as e:
-                        log.append(self._mk(
-                            "backstop-phase3",
-                            f"backstop error #{b.id}: {e}"))
+                        log.append(
+                            self._mk("backstop-phase3", f"backstop error #{b.id}: {e}")
+                        )
                 self._archive([b])
                 b.content = f"[offloaded longterm #{b.id} -> archive.jsonl]"
-                b.tag = SHORT   # the pointer itself is disposable later
-                log.append(self._mk("evict-phase3",
-                                    f"offloaded longterm #{b.id} to archive, "
-                                    f"left pointer"))
+                b.tag = SHORT  # the pointer itself is disposable later
+                log.append(
+                    self._mk(
+                        "evict-phase3",
+                        f"offloaded longterm #{b.id} to archive, " f"left pointer",
+                    )
+                )
 
         if self.over_budget():
-            log.append(self._mk(
-                "warn", "still over budget after all phases "
-                "(pinned + longterm alone exceed the window)"))
+            log.append(
+                self._mk(
+                    "warn",
+                    "still over budget after all phases "
+                    "(pinned + longterm alone exceed the window)",
+                )
+            )
         self.events.extend(log)
         return log
 
@@ -401,8 +457,9 @@ class MemoryHarness:
         if self.cfg.decay_enabled:
             self._decay_demote(log)
 
-    def _backstop_eviction(self, doomed: List[Block], phase: str,
-                           log: List[str]) -> List[Block]:
+    def _backstop_eviction(
+        self, doomed: List[Block], phase: str, log: List[str]
+    ) -> List[Block]:
         """Batched SystemOne backstop: ask which blocks are safe to evict.
 
         Sends all candidates in a single API call with one noul question per
@@ -421,33 +478,37 @@ class MemoryHarness:
                     "redundant information, or content that won't be needed again. "
                     "Answer no if it contains facts, decisions, working state, or "
                     "anything that might be referenced later."
-                )
+                ),
             }
 
         try:
             # Batch all eviction candidates into one SystemOne call
             resp = self.systemone.system_one(
-                {"blocks": [b.content for b in doomed]}, questions)
+                {"blocks": [b.content for b in doomed]}, questions
+            )
 
             kept = []
             for i, b in enumerate(doomed):
                 qid = f"drop_{b.id}"
                 noul = resp["answers"].get(qid, {}).get("noul", 0.5)
                 if noul >= self.cfg.systemone_evict_threshold:
-                    log.append(self._mk(f"backstop-{phase}",
-                                        f"cleared #{b.id} (noul={noul:.2f})"))
+                    log.append(
+                        self._mk(
+                            f"backstop-{phase}", f"cleared #{b.id} (noul={noul:.2f})"
+                        )
+                    )
                 else:
                     kept.append(b)
-                    log.append(self._mk(f"backstop-{phase}",
-                                        f"kept #{b.id} (noul={noul:.2f})"))
+                    log.append(
+                        self._mk(f"backstop-{phase}", f"kept #{b.id} (noul={noul:.2f})")
+                    )
             return [b for b in doomed if b not in kept]
         except RuntimeError as e:
-            log.append(self._mk(f"backstop-{phase}",
-                                f"batched backstop error: {e}"))
+            log.append(self._mk(f"backstop-{phase}", f"batched backstop error: {e}"))
             return doomed  # on error, evict as planned
 
     def _drop(self, doomed: List[Block]) -> None:
-        self._archive(doomed)   # evict from live window, keep a copy on disk
+        self._archive(doomed)  # evict from live window, keep a copy on disk
         ids = {id(b) for b in doomed}
         self.blocks = [b for b in self.blocks if id(b) not in ids]
 
@@ -455,8 +516,18 @@ class MemoryHarness:
         os.makedirs(self.cfg.workdir, exist_ok=True)
         with open(self.archive_path, "a", encoding="utf-8") as f:
             for b in blocks:
-                f.write(json.dumps({"id": b.id, "turn": b.turn, "role": b.role,
-                                    "tag": b.tag, "content": b.content}) + "\n")
+                f.write(
+                    json.dumps(
+                        {
+                            "id": b.id,
+                            "turn": b.turn,
+                            "role": b.role,
+                            "tag": b.tag,
+                            "content": b.content,
+                        }
+                    )
+                    + "\n"
+                )
 
     # -- recall: offload & retrieval (ContextBench KV-store style) --------------
     def recall(self, query: str, limit: int = 50) -> List[dict]:
@@ -484,8 +555,11 @@ class MemoryHarness:
             for line in f:
                 rec = json.loads(line)
                 if rec.get("id") == block_id:
-                    self.add(rec["role"],
-                             f"[recalled #{block_id}] {rec['content']}", tag=SHORT)
+                    self.add(
+                        rec["role"],
+                        f"[recalled #{block_id}] {rec['content']}",
+                        tag=SHORT,
+                    )
                     return True
         return False
 
@@ -497,12 +571,16 @@ class MemoryHarness:
     def mirror_files(self) -> None:
         os.makedirs(self.cfg.workdir, exist_ok=True)
         with open(self.context_md_path, "w", encoding="utf-8") as f:
-            f.write(f"<!-- live context mirror | turn {self.turn} | "
-                    f"{self.tokens()}/{self.cfg.max_context_tokens} tokens -->\n")
+            f.write(
+                f"<!-- live context mirror | turn {self.turn} | "
+                f"{self.tokens()}/{self.cfg.max_context_tokens} tokens -->\n"
+            )
             for b in self.blocks:
-                f.write(f"[[CTX_TURN {b.turn} id={b.id} role={b.role} "
-                        f"tag={b.tag}{' PINNED' if b.pinned else ''}]]\n"
-                        f"{b.content}\n\n")
+                f.write(
+                    f"[[CTX_TURN {b.turn} id={b.id} role={b.role} "
+                    f"tag={b.tag}{' PINNED' if b.pinned else ''}]]\n"
+                    f"{b.content}\n\n"
+                )
         with open(self.context_jsonl_path, "w", encoding="utf-8") as f:
             for b in self.blocks:
                 f.write(json.dumps(dataclasses.asdict(b)) + "\n")
@@ -528,10 +606,9 @@ class MemoryHarness:
         if self.cfg.decay_enabled:
             n = self.reheat(user_text)
             if n:
-                self._event("maintain-reheat",
-                            f"reheated {n} block(s) on access")
+                self._event("maintain-reheat", f"reheated {n} block(s) on access")
 
-        self.evict()                                  # room BEFORE generating
+        self.evict()  # room BEFORE generating
         raw = self.llm.chat(self.serialize_messages())
         if TAG_RE.search(raw) and self.cfg.classify_mode in ("inline", "both"):
             parts = split_tagged(raw)
@@ -539,20 +616,27 @@ class MemoryHarness:
                 # The model honoured the inline contract: mark its untagged
                 # user message short-term instead of waiting for a router call.
                 for b in self.blocks:
-                    if (b.turn == self.turn and b.role == "user"
-                            and b.tag == TRANSIENT and not b.pinned):
+                    if (
+                        b.turn == self.turn
+                        and b.role == "user"
+                        and b.tag == TRANSIENT
+                        and not b.pinned
+                    ):
                         b.tag = SHORT
-            for tag, chunk in parts:                 # classify as it decodes
+            for tag, chunk in parts:  # classify as it decodes
                 self.add("assistant", chunk, tag=tag)
         else:
             self.add("assistant", raw)
-        self.classify_new()                           # post-turn router pass
-        log = self.evict()                            # enforce budget after growth
+        self.classify_new()  # post-turn router pass
+        log = self.evict()  # enforce budget after growth
         self.mirror_files()
         for e in log:
             print(f"  [evict] {e['text']}")
-        return "\n".join(strip_tags(b.content) for b in self.blocks
-                         if b.role == "assistant" and b.turn == self.turn)
+        return "\n".join(
+            strip_tags(b.content)
+            for b in self.blocks
+            if b.role == "assistant" and b.turn == self.turn
+        )
 
     # -- introspection ---------------------------------------------------------------
     def live_blocks(self, tag: str = "") -> List[Block]:
@@ -571,8 +655,12 @@ class MemoryHarness:
         with open(self.archive_path, encoding="utf-8") as f:
             return sum(1 for _ in f)
 
-    def snapshot(self, preview_chars: int = 320, events_tail: int = 24,
-                 include_full: bool = False) -> Dict:
+    def snapshot(
+        self,
+        preview_chars: int = 320,
+        events_tail: int = 24,
+        include_full: bool = False,
+    ) -> Dict:
         """JSON-friendly view of the live window -- what the web UI renders.
 
         Blocks carry a `preview` plus token counts so the UI can show hints
@@ -582,7 +670,10 @@ class MemoryHarness:
         blocks = []
         for b in self.blocks:
             entry = {
-                "id": b.id, "role": b.role, "tag": b.tag, "turn": b.turn,
+                "id": b.id,
+                "role": b.role,
+                "tag": b.tag,
+                "turn": b.turn,
                 "pinned": b.pinned,
                 "tokens": self.counter.count_block(b),
                 "chars": len(b.content),
@@ -619,6 +710,8 @@ class MemoryHarness:
 
     def status(self) -> str:
         n = self.counts()
-        return (f"turn={self.turn} tokens={self.tokens()}/"
-                f"{self.cfg.max_context_tokens} blocks={len(self.blocks)} "
-                f"(long={n[LONG]} short={n[SHORT]} transient={n[TRANSIENT]})")
+        return (
+            f"turn={self.turn} tokens={self.tokens()}/"
+            f"{self.cfg.max_context_tokens} blocks={len(self.blocks)} "
+            f"(long={n[LONG]} short={n[SHORT]} transient={n[TRANSIENT]})"
+        )

@@ -4,6 +4,7 @@ demo and the test-suite without a GPU.
 
 SystemOneClient wraps the System One Lite decision API (http://127.0.0.1:8010)
 for typed questions -- used for memory classification and eviction backstops."""
+
 from __future__ import annotations
 import json
 import os
@@ -16,19 +17,27 @@ class OpenAIChat:
     """Thin wrapper over any OpenAI-compatible endpoint (vLLM, Ollama,
     llama.cpp server, LM Studio, ...)."""
 
-    def __init__(self, base_url: str = "http://localhost:8000/v1",
-                 model: str = "Qwen/Qwen3-8B-Instruct",
-                 api_key: str = "EMPTY",
-                 temperature: float = 0.6, max_tokens: int = 1024):
-        from openai import OpenAI   # lazy: keeps `demo` runnable without the dep
+    def __init__(
+        self,
+        base_url: str = "http://localhost:8000/v1",
+        model: str = "Qwen/Qwen3-8B-Instruct",
+        api_key: str = "EMPTY",
+        temperature: float = 0.6,
+        max_tokens: int = 1024,
+    ):
+        from openai import OpenAI  # lazy: keeps `demo` runnable without the dep
+
         self.client = OpenAI(base_url=base_url, api_key=api_key)
         self.model = model
         self.temperature = temperature
         self.max_tokens = max_tokens
 
-    def chat(self, messages: List[Dict[str, str]],
-             temperature: Optional[float] = None,
-             max_tokens: Optional[int] = None) -> str:
+    def chat(
+        self,
+        messages: List[Dict[str, str]],
+        temperature: Optional[float] = None,
+        max_tokens: Optional[int] = None,
+    ) -> str:
         resp = self.client.chat.completions.create(
             model=self.model,
             messages=messages,
@@ -50,12 +59,25 @@ class StubChat:
         "Ha, good one! Anyway, continuing.",
         "<longterm>API key stored as KEY_{i}; table name is users_v{i}.</longterm> Saved it.",
     ]
-    _LONG_KW = ("remember", "decision", "password", "api key", "codename",
-                "deadline", "spec", "final", "port", "schema")
+    _LONG_KW = (
+        "remember",
+        "decision",
+        "password",
+        "api key",
+        "codename",
+        "deadline",
+        "spec",
+        "final",
+        "port",
+        "schema",
+    )
 
-    def chat(self, messages: List[Dict[str, str]],
-             temperature: Optional[float] = None,
-             max_tokens: Optional[int] = None) -> str:
+    def chat(
+        self,
+        messages: List[Dict[str, str]],
+        temperature: Optional[float] = None,
+        max_tokens: Optional[int] = None,
+    ) -> str:
         first = messages[0]["content"] if messages else ""
         last = messages[-1]["content"] if messages else ""
         if "memory router" in first:
@@ -69,8 +91,11 @@ class StubChat:
         for m in re.finditer(r"id=(\d+) role=(\w+) text=(.*)", prompt):
             bid, _role, txt = m.groups()
             low = txt.lower()
-            tag = LONG if any(k in low for k in cls._LONG_KW) else (
-                TRANSIENT if len(txt) < 60 else SHORT)
+            tag = (
+                LONG
+                if any(k in low for k in cls._LONG_KW)
+                else (TRANSIENT if len(txt) < 60 else SHORT)
+            )
             labels.append({"id": int(bid), "tag": tag})
         return json.dumps({"labels": labels})
 
@@ -99,8 +124,12 @@ class SystemOneClient:
     Default base URL is http://127.0.0.1:8010 (local System One Lite server).
     """
 
-    def __init__(self, base_url: str = "http://127.0.0.1:8010",
-                 model: str = "", api_key: str = ""):
+    def __init__(
+        self,
+        base_url: str = "http://127.0.0.1:8010",
+        model: str = "",
+        api_key: str = "",
+    ):
         self.base_url = base_url.rstrip("/")
         self.model = model or DEFAULT_SYSTEMONE_MODEL
         self.api_key = api_key or os.environ.get("FEATHERLESS_API_KEY", "")
@@ -123,22 +152,23 @@ class SystemOneClient:
         import urllib.error
 
         paths = ([self._path] if self._path else []) + [
-            p for p in SYSTEMONE_PATHS if p != self._path]
+            p for p in SYSTEMONE_PATHS if p != self._path
+        ]
         last_exc: Optional[Exception] = None
         for path in paths:
             body = json.dumps(
-                {"model": self.model, "state": state,
-                 "questions": questions}).encode()
+                {"model": self.model, "state": state, "questions": questions}
+            ).encode()
             headers = {"Content-Type": "application/json"}
             if self.api_key:
                 headers["Authorization"] = f"Bearer {self.api_key}"
             req = urllib.request.Request(
-                f"{self.base_url}{path}", data=body,
-                headers=headers, method="POST")
+                f"{self.base_url}{path}", data=body, headers=headers, method="POST"
+            )
             try:
                 with urllib.request.urlopen(req, timeout=60) as resp:
                     out = json.loads(resp.read().decode())
-                    self._path = path          # sticky: skip probing next time
+                    self._path = path  # sticky: skip probing next time
                     return out
             except urllib.error.HTTPError as e:
                 # 404/405 usually means this server does not expose that route
@@ -151,7 +181,8 @@ class SystemOneClient:
                     except Exception:
                         detail = ""
                     last_exc = RuntimeError(
-                        f"SystemOne API {e.code} at {path}: {detail}")
+                        f"SystemOne API {e.code} at {path}: {detail}"
+                    )
                     continue
                 detail = ""
                 try:
@@ -159,7 +190,8 @@ class SystemOneClient:
                 except Exception:
                     pass
                 raise RuntimeError(
-                    f"SystemOne API error {e.code} at {path}: {detail}") from e
+                    f"SystemOne API error {e.code} at {path}: {detail}"
+                ) from e
             except urllib.error.URLError as e:
                 last_exc = e
         raise RuntimeError(f"SystemOne API error: {last_exc}") from last_exc
@@ -181,8 +213,8 @@ class SystemOneClient:
                 "criteria": {
                     LONG: "Durable facts, decisions, IDs, specs, credentials, requirements likely needed much later",
                     SHORT: "Working state, intermediate reasoning, recent task output useful for a while but not forever",
-                    TRANSIENT: "Pleasantries, filler, redundant restatement, small talk, ephemeral chatter"
-                }
+                    TRANSIENT: "Pleasantries, filler, redundant restatement, small talk, ephemeral chatter",
+                },
             }
         }
         resp = self.system_one({"text": text}, questions)
@@ -202,7 +234,7 @@ class SystemOneClient:
                     "redundant information, or content that won't be needed again. "
                     "Answer no if it contains facts, decisions, working state, or "
                     "anything that might be referenced later."
-                )
+                ),
             }
         }
         resp = self.system_one({"block": block_content}, questions)
@@ -217,8 +249,18 @@ class MockSystemOne:
     decisions. No HTTP calls required.
     """
 
-    _LONG_KW = ("remember", "decision", "password", "api key", "codename",
-                "deadline", "spec", "final", "port", "schema")
+    _LONG_KW = (
+        "remember",
+        "decision",
+        "password",
+        "api key",
+        "codename",
+        "deadline",
+        "spec",
+        "final",
+        "port",
+        "schema",
+    )
 
     def __init__(self):
         pass
@@ -235,14 +277,23 @@ class MockSystemOne:
                     text = str(state)
                 low = text.lower()
                 if any(k in low for k in self._LONG_KW):
-                    answers[qid] = {"type": "choice", "choice": LONG,
-                                    "confidence": 0.85}
+                    answers[qid] = {
+                        "type": "choice",
+                        "choice": LONG,
+                        "confidence": 0.85,
+                    }
                 elif len(text) < 60:
-                    answers[qid] = {"type": "choice", "choice": TRANSIENT,
-                                    "confidence": 0.75}
+                    answers[qid] = {
+                        "type": "choice",
+                        "choice": TRANSIENT,
+                        "confidence": 0.75,
+                    }
                 else:
-                    answers[qid] = {"type": "choice", "choice": SHORT,
-                                    "confidence": 0.80}
+                    answers[qid] = {
+                        "type": "choice",
+                        "choice": SHORT,
+                        "confidence": 0.80,
+                    }
             elif spec["type"] == "noul":
                 # Simulate: short/filler content is safe to drop
                 if isinstance(state, dict):

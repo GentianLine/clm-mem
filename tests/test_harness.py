@@ -1,18 +1,28 @@
 """Tests for the eviction engine and tag parsing (no GPU / server needed)."""
+
 import json
 import pytest
-from clm_mem import (HarnessConfig, LONG, MemoryHarness, SHORT, StubChat,
-                     TRANSIENT, split_tagged)
+from clm_mem import (
+    HarnessConfig,
+    LONG,
+    MemoryHarness,
+    SHORT,
+    StubChat,
+    TRANSIENT,
+    split_tagged,
+)
 from clm_mem.tagging import strip_tags
 
 
 def make_harness(tmp_path, **kw) -> MemoryHarness:
-    cfg = HarnessConfig(max_context_tokens=kw.pop("budget", 400),
-                        shortterm_keep_pct=kw.pop("keep", 0.5),
-                        keep_recent_turns=kw.pop("recent", 1),
-                        workdir=str(tmp_path),
-                        memory_preamble=kw.pop("preamble", False),
-                        **kw)
+    cfg = HarnessConfig(
+        max_context_tokens=kw.pop("budget", 400),
+        shortterm_keep_pct=kw.pop("keep", 0.5),
+        keep_recent_turns=kw.pop("recent", 1),
+        workdir=str(tmp_path),
+        memory_preamble=kw.pop("preamble", False),
+        **kw,
+    )
     return MemoryHarness(StubChat(), cfg)
 
 
@@ -20,10 +30,15 @@ def make_harness(tmp_path, **kw) -> MemoryHarness:
 def test_split_tagged_basic():
     parts = split_tagged(
         "hi <longterm>key is K1</longterm> and "
-        "<shortterm>todo: diff 3</shortterm> bye")
-    assert parts == [("transient", "hi"), ("longterm", "key is K1"),
-                     ("transient", "and"), ("shortterm", "todo: diff 3"),
-                     ("transient", "bye")]
+        "<shortterm>todo: diff 3</shortterm> bye"
+    )
+    assert parts == [
+        ("transient", "hi"),
+        ("longterm", "key is K1"),
+        ("transient", "and"),
+        ("shortterm", "todo: diff 3"),
+        ("transient", "bye"),
+    ]
 
 
 def test_split_tagged_none():
@@ -45,21 +60,23 @@ def test_keep_pct_range_rejected():
 def test_phase1_deletes_transient_keeps_memory(tmp_path):
     h = make_harness(tmp_path, budget=400, recent=1)
     big = "filler text that is quite long and eats up the token budget " * 5
-    for i in range(6):                       # push over budget with chatter
+    for i in range(6):  # push over budget with chatter
         h.turn += 1
         h.add("user", f"{big} {i}")
-    h.add("assistant", "PORT=8080", tag=LONG)   # add() stores raw; tags are stripped by step()
+    h.add(
+        "assistant", "PORT=8080", tag=LONG
+    )  # add() stores raw; tags are stripped by step()
     assert h.over_budget()
     log = h.evict()
     assert any(l["kind"] == "evict-phase1" for l in log)
     assert not [b for b in h.blocks if b.tag == TRANSIENT and b.turn < h.turn]
-    assert any(b.content == "PORT=8080" for b in h.blocks)   # longterm survives
+    assert any(b.content == "PORT=8080" for b in h.blocks)  # longterm survives
 
 
 # -- phase 2: shortterm FIFO with keep-pct ------------------------------------
 def test_phase2_fifo_rounds(tmp_path):
     h = make_harness(tmp_path, budget=300, keep=0.5)
-    big = "x" * 400                          # ~101 tokens per block
+    big = "x" * 400  # ~101 tokens per block
     ids = []
     for i in range(6):
         h.turn += 1
@@ -69,8 +86,8 @@ def test_phase2_fifo_rounds(tmp_path):
     live = [b.id for b in h.blocks if b.tag == SHORT]
     # oldest-first eviction: whatever survives must be the newest ids
     assert live == sorted(live, reverse=True)[: len(live)] or live == sorted(live)
-    assert not set(ids[:2]) & set(live)      # oldest two are gone
-    assert ids[-1] in live                   # newest survives
+    assert not set(ids[:2]) & set(live)  # oldest two are gone
+    assert ids[-1] in live  # newest survives
 
 
 def test_phase2_higher_keep_deletes_fewer(tmp_path):
@@ -82,6 +99,7 @@ def test_phase2_higher_keep_deletes_fewer(tmp_path):
             h.add("user", f"note {i} {big}", tag=SHORT)
         h.evict()
         return len([b for b in h.blocks if b.tag == SHORT])
+
     assert survivors(0.75) >= survivors(0.25)
 
 
@@ -96,8 +114,7 @@ def test_phase3_offloads_longterm_with_pointer(tmp_path):
     assert any(l["kind"] == "evict-phase3" for l in log)
     pointers = [b for b in h.blocks if "offloaded longterm" in b.content]
     assert pointers and all(b.tag == SHORT for b in pointers)
-    archived = [json.loads(l) for l in
-                open(h.archive_path, encoding="utf-8")]
+    archived = [json.loads(l) for l in open(h.archive_path, encoding="utf-8")]
     assert any("durable 0" in r["content"] for r in archived)
     hits = h.recall("durable 0")
     assert hits and h.reinject(hits[0]["id"])
@@ -127,7 +144,12 @@ def test_mock_systemone_classify_transient():
 def test_mock_systemone_classify_shortterm():
     """MockSystemOne should classify working state as shortterm."""
     m = MockSystemOne()
-    assert m.classify_memory("I need to review the diff for PR #45 and check the build status") == SHORT
+    assert (
+        m.classify_memory(
+            "I need to review the diff for PR #45 and check the build status"
+        )
+        == SHORT
+    )
 
 
 def test_mock_systemone_should_evict():
@@ -152,9 +174,10 @@ def test_systemone_preclassification_in_step(tmp_path):
     assert user_blocks[0].tag == LONG
 
     # Check events show pre-classification happened
-    assert any(e["kind"] == "classify"
-               and "pre-classified user msg -> longterm" in e["text"]
-               for e in h.events)
+    assert any(
+        e["kind"] == "classify" and "pre-classified user msg -> longterm" in e["text"]
+        for e in h.events
+    )
 
 
 def test_systemone_preclassification_transient(tmp_path):
@@ -206,8 +229,7 @@ def test_phase3_backstop_keeps_longterm(tmp_path):
         h.step(f"Remember: important fact {i} about port 80{i}")
 
     # Check that phase 3 backstop events exist
-    phase3_events = [e for e in h.events
-                     if e["kind"] == "backstop-phase3"]
+    phase3_events = [e for e in h.events if e["kind"] == "backstop-phase3"]
     assert len(phase3_events) > 0, "Expected phase 3 backstop events"
 
 
@@ -228,5 +250,4 @@ def test_end_to_end_stays_under_budget(tmp_path):
     assert h.blocks[0].pinned and h.blocks[0].tag == LONG
     # files mirrored as in the paper's context-as-a-file
     assert "CTX_TURN" in open(h.context_md_path, encoding="utf-8").read()
-    json.loads(open(h.context_jsonl_path, encoding="utf-8")
-               .readline())  # valid JSONL
+    json.loads(open(h.context_jsonl_path, encoding="utf-8").readline())  # valid JSONL

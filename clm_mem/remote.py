@@ -8,6 +8,7 @@ Everything the web UI can do per workspace (status, tag listings, archive
 search, reinject, live keep-pct) is available at the prompt through the same
 REST API the studio's app.js uses.
 """
+
 from __future__ import annotations
 import json
 import urllib.error
@@ -19,6 +20,7 @@ from .server import SESSION_HEADER
 def _ns(d: Dict):
     """Lightweight object from a snapshot block dict."""
     from types import SimpleNamespace
+
     return SimpleNamespace(**d)
 
 
@@ -30,13 +32,21 @@ class RemoteConfig:
     local MemoryHarness.
     """
 
-    _FIELDS = ("shortterm_keep_pct", "max_context_tokens",
-               "systemone_evict_threshold", "decay_enabled",
-               "supersede_enabled")
+    _FIELDS = (
+        "shortterm_keep_pct",
+        "max_context_tokens",
+        "systemone_evict_threshold",
+        "decay_enabled",
+        "supersede_enabled",
+    )
 
-    _DEFAULTS = {"shortterm_keep_pct": 0.5, "max_context_tokens": 8192,
-                 "systemone_evict_threshold": 0.7,
-                 "decay_enabled": False, "supersede_enabled": False}
+    _DEFAULTS = {
+        "shortterm_keep_pct": 0.5,
+        "max_context_tokens": 8192,
+        "systemone_evict_threshold": 0.7,
+        "decay_enabled": False,
+        "supersede_enabled": False,
+    }
 
     def __init__(self, remote: "RemoteHarness", values: Dict):
         object.__setattr__(self, "_remote", remote)
@@ -57,23 +67,32 @@ class RemoteConfig:
 class RemoteHarness:
     """Talks to a live serve session over its REST API (same library underneath)."""
 
-    def __init__(self, base_url: str, session: str = "ws:cli",
-                 api_key: str = "EMPTY"):
+    def __init__(self, base_url: str, session: str = "ws:cli", api_key: str = "EMPTY"):
         # base_url: the OpenAI-style public base, e.g. http://127.0.0.1:8080/v1
         self.base_url = base_url.rstrip("/")
         self.session = session
         self.api_key = api_key
-        root = self.base_url[: -len("/v1")] if self.base_url.endswith("/v1")             else self.base_url
+        root = (
+            self.base_url[: -len("/v1")]
+            if self.base_url.endswith("/v1")
+            else self.base_url
+        )
         self.root = root
         self.cfg = RemoteConfig(self, {})
 
     # -- transport -----------------------------------------------------------
-    def _req(self, method: str, path: str, body: Optional[dict] = None,
-             extra_headers: Dict[str, str] | None = None):
+    def _req(
+        self,
+        method: str,
+        path: str,
+        body: Optional[dict] = None,
+        extra_headers: Dict[str, str] | None = None,
+    ):
         data = json.dumps(body).encode() if body is not None else None
         headers = {"Content-Type": "application/json", **(extra_headers or {})}
-        req = urllib.request.Request(f"{self.root}{path}", data=data,
-                                     method=method, headers=headers)
+        req = urllib.request.Request(
+            f"{self.root}{path}", data=data, method=method, headers=headers
+        )
         try:
             with urllib.request.urlopen(req, timeout=300) as r:
                 raw = r.read()
@@ -84,6 +103,7 @@ class RemoteHarness:
     @property
     def _snap_path(self) -> str:
         from urllib.parse import quote
+
         return f"/v1/clm/sessions/{quote(self.session, '')}"
 
     def push_settings(self, settings: Dict) -> None:
@@ -100,9 +120,14 @@ class RemoteHarness:
 
     # -- harness-shaped surface -------------------------------------------------
     def step(self, user_text: str) -> str:
-        resp = self._req("POST", "/v1/chat/completions", {
-            "messages": [{"role": "user", "content": user_text}],
-        }, extra_headers={SESSION_HEADER: self.session})
+        resp = self._req(
+            "POST",
+            "/v1/chat/completions",
+            {
+                "messages": [{"role": "user", "content": user_text}],
+            },
+            extra_headers={SESSION_HEADER: self.session},
+        )
         reply = resp["choices"][0]["message"]["content"]
         # pull live settings/budget so local knobs mirror the server truth
         snap = self.snapshot()
@@ -110,8 +135,9 @@ class RemoteHarness:
         return reply
 
     def snapshot(self, full: bool = False) -> Dict:
-        return self._req("GET", f"{self._snap_path}/snapshot"
-                         + ("?full=1" if full else ""))
+        return self._req(
+            "GET", f"{self._snap_path}/snapshot" + ("?full=1" if full else "")
+        )
 
     def status(self) -> str:
         try:
@@ -119,9 +145,11 @@ class RemoteHarness:
         except Exception:
             return "turn=0 blocks=0 (new session -- send a message to create it)"
         n = s["counts"]
-        return (f"turn={s['turn']} tokens={s['tokens']}/{s['budget']} "
-                f"blocks={len(s['blocks'])} (long={n['longterm']} "
-                f"short={n['shortterm']} transient={n['transient']})")
+        return (
+            f"turn={s['turn']} tokens={s['tokens']}/{s['budget']} "
+            f"blocks={len(s['blocks'])} (long={n['longterm']} "
+            f"short={n['shortterm']} transient={n['transient']})"
+        )
 
     def counts(self) -> Dict[str, int]:
         return self.snapshot()["counts"]
@@ -132,14 +160,17 @@ class RemoteHarness:
 
     def recall(self, query: str, limit: int = 50) -> List[dict]:
         from urllib.parse import quote
-        d = self._req("GET", f"{self._snap_path}/archive"
-                      f"?q={quote(query)}&limit={limit}")
+
+        d = self._req(
+            "GET", f"{self._snap_path}/archive" f"?q={quote(query)}&limit={limit}"
+        )
         return d.get("hits", [])
 
     def reinject(self, block_id: int) -> bool:
         try:
-            self._req("POST", f"{self._snap_path}/reinject",
-                      {"block_id": int(block_id)})
+            self._req(
+                "POST", f"{self._snap_path}/reinject", {"block_id": int(block_id)}
+            )
             return True
         except RuntimeError:
             return False
@@ -156,8 +187,9 @@ class RemoteHarness:
             return None
 
 
-def connect(base_url: str, session: Optional[str] = None,
-            workspace: Optional[str] = None) -> RemoteHarness:
+def connect(
+    base_url: str, session: Optional[str] = None, workspace: Optional[str] = None
+) -> RemoteHarness:
     """Build a RemoteHarness; workspace sets a ws:<name> session."""
     if session is None:
         session = f"ws:{workspace}" if workspace else "ws:cli"
