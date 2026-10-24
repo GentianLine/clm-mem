@@ -466,6 +466,53 @@ def test_chat_open_registers_empty_slot(sup):
     assert st == 400
 
 
+def test_chat_open_seed_gives_a_chat_born_with_memories(sup):
+    http_call(sup, "/v1/clm/workspaces", "POST", {"name": "seeded"})
+    st, d = http_call(
+        sup,
+        "/v1/clm/sessions/ws%3Aseeded/chat-open",
+        "POST",
+        {
+            "chat": "chat-002",
+            "seed": ["User prefers dark roast coffee.", "Pet named Miso."],
+        },
+    )
+    assert st == 200 and d["ok"]
+    assert len(d["seeded"]) == 2
+    assert all(s["ok"] for s in d["seeded"])
+    assert all(s["block_id"] is not None for s in d["seeded"])
+
+    # the seeded facts live in the window, attributed to chat-002, longterm+pinned
+    st, snap = http_call(
+        sup,
+        "/v1/clm/sessions/ws%3Aseeded/snapshot?chats=chat-002",
+        "GET",
+    )
+    seed_blocks = [b for b in snap["blocks"] if b.get("content", "").startswith(("User prefers dark roast", "Pet named"))]
+    assert len(seed_blocks) == 2, snap
+    assert all(b["tag"] == "longterm" and b["chat"] == "chat-002" for b in seed_blocks)
+    assert all(b.get("pinned") for b in seed_blocks)
+
+    # chat-001 does not see them (per-chat visibility holds for seeds too)
+    st, snap1 = http_call(
+        sup,
+        "/v1/clm/sessions/ws%3Aseeded/snapshot?chats=chat-001",
+        "GET",
+    )
+    assert not [
+        b for b in snap1["blocks"] if "dark roast" in (b.get("content") or "")
+    ]
+
+    # empty seed strings are skipped, no crash
+    st, d = http_call(
+        sup,
+        "/v1/clm/sessions/ws%3Aseeded/chat-open",
+        "POST",
+        {"chat": "chat-003", "seed": ["   ", ""]},
+    )
+    assert st == 200 and d["seeded"] == []
+
+
 def test_chat_activity_filtering(sup):
     http_call(sup, "/v1/clm/workspaces", "POST", {"name": "chats"})
     st, d = http_call(

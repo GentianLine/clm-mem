@@ -892,6 +892,32 @@ class MemoryHarness:
         if CHAT_RE_P.match(chat or ""):
             self.known_chats.add(chat)
 
+    def remember(
+        self, text: str, chat: Optional[str] = None, pinned: bool = False
+    ) -> Dict:
+        """Seed a longterm fact straight into the live window.
+
+        This is how a chat born with memories gets them: a block tagged
+        ``longterm`` (and optionally pinned so eviction can't touch it),
+        attributed to *chat* when given. Classification/eviction treat it
+        exactly like an LLM-classified longterm block from then on.
+        """
+        text = (text or "").strip()
+        if not text:
+            return {"ok": False, "error": "empty fact"}
+        slot: Optional[int] = None
+        if chat and CHAT_RE_P.match(chat):
+            self.known_chats.add(chat)
+            slot = int(CHAT_RE_P.match(chat).group(1)) - 1
+        b = self.add("user", text, tag=LONG, pinned=pinned, slot=slot)
+        self.mirror_files()
+        return {
+            "ok": True,
+            "block_id": b.id,
+            "tag": b.tag,
+            "chat": slot_to_chat(b.chat_slot),
+        }
+
     def counts(self) -> Dict[str, int]:
         out = {LONG: 0, SHORT: 0, TRANSIENT: 0}
         for b in self.blocks:
