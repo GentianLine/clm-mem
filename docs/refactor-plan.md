@@ -414,7 +414,11 @@ the rest.
   functions `(sup, req) -> reply`. Same paths, same bodies - pure structure.
 - One test asserts the full documented route set == implemented route set.
 
-### M3 - Session API (`feat/session-api`)
+### M3 - Session API (`spike/session-api`) — BREAKING, in progress
+- The compat mode is **not** shipped on this milestone: header-based memory
+  stops being the contract. `/v1/chat/completions` becomes pure passthrough;
+  memory lives behind explicit verbs (see below). Downstream tools migrate
+  against this branch.
 - Implement `POST /v1/clm/sessions`, `/turns` (non-stream + SSE replay via
   shared helper), transcript GET; `Session` object with metadata.
 - **Branch model per decision D1:** a `Session` == workspace branch == one
