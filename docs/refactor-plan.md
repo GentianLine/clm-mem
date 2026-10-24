@@ -414,11 +414,11 @@ the rest.
   functions `(sup, req) -> reply`. Same paths, same bodies - pure structure.
 - One test asserts the full documented route set == implemented route set.
 
-### M3 - Session API (`spike/session-api`) — BREAKING, in progress
-- The compat mode is **not** shipped on this milestone: header-based memory
-  stops being the contract. `/v1/chat/completions` becomes pure passthrough;
-  memory lives behind explicit verbs (see below). Downstream tools migrate
-  against this branch.
+### M3 - Session API (`spike/session-api`) — BREAKING, shipped on-branch
+- The compat mode is **not** shipped: header-based memory stops being the
+  contract outright. `/v1/chat/completions` is pure passthrough; memory
+  lives behind the verbs below. Downstream tools migrate against this
+  branch (owner directive: "be brave, this is a breaking change and that's ok").
 - Implement `POST /v1/clm/sessions`, `/turns` (non-stream + SSE replay via
   shared helper), transcript GET; `Session` object with metadata.
 - **Branch model per decision D1:** a `Session` == workspace branch == one
@@ -426,24 +426,27 @@ the rest.
   metadata (created_at, last_used, chat slots, config template) and keeps
   room for future `from`/parent fields so fork-on-create and optional
   sharing never require re-shaping it later.
-- Compat adapter: header path calls the same handlers; bare ids become
-  anonymous branches (`ws:<id>`, validated by `WS_NAME_RE`).
+- No compat adapter by decision above: legacy header senders get a 410 with
+  the migration hint (kept as detection + teaching, not as behavior).
 - `clients/remote.py`: add `open()`, `turn()`; keep `step()` as sugar over
   them (RemoteHarness becomes the reference SDK).
-- MCP: add `clm_open_session`, `clm_turn` tools.
-- `--memory-entry` flag; default `both`; telemetry in `/health`.
+- DONE: MCP gained `clm_open_session`; `clm_chat` opens implicitly.
+- NOT SHIPPED (superseded): the `--memory-entry` flag and `/health`
+  legacy-session telemetry -- moot without a compat mode.
 
-### M4 - Clients migrate (`feat/clients-migrate`)
-- Web studio app.js: send via `/turns` (with SSE), open session explicitly,
-  chat-open/reset unchanged. Keep UI behavior identical (scroll tests exist).
-- CLI chat --connect uses open+turns; demo unaffected.
-- README rewrite of the "Client contract" section: documented verbs, modes,
-  migration table for header users.
+### M4 - Clients migrate (folded into this same branch) — DONE
+- Web studio app.js sends via `/turns` and opens the branch explicitly
+  (`openSession()`; reset re-opens). UI behavior otherwise identical --
+  layout/scroll suites still pass.
+- CLI chat --connect rides RemoteHarness open+turns; demo unaffected.
+- README "Client contract" rewritten around the verbs (http example + SDK
+  snippet); studio API table lists sessions/turns.
 
-### M5 - Flip & clean (`refactor/flip-defaults`, one release later)
-- Default `--memory-entry=explicit`; legacy adapter behind flag; remove bare-id
-  implicit sessions when compat ends.
-- Update Unsloth-facing docs (the README's openai-python example).
+### M5 - Flip & clean — VAPORWARE
+Nothing left to flip: this branch skipped the compat window outright. What
+remains for a cleanup pass is deleting the 410 legacy-detection shim once no
+downstream tool sends the old headers (Unsloth Studio integration being the
+consumer to watch).
 
 ### M6 - True streaming (`feat/streaming`, milestone S2)
 - `OpenAIChat.chat(stream=True)`; incremental tag-splitting in harness;
