@@ -251,14 +251,18 @@ def sup(tmp_path):
 HDR = {"X-Cllm-Mem-Session": "ws:agent"}
 
 
-def test_serve_agent_turn_and_activity(sup):
-    st, resp = http_call(
+def _turn(sup, text):
+    http_call(sup, "/v1/clm/sessions", "POST", {"session": "ws:agent"})
+    return http_call(
         sup,
-        "/v1/chat/completions",
+        "/v1/clm/sessions/ws%3Aagent/turns",
         "POST",
-        {"messages": [{"role": "user", "content": 'search "unsloth studio"'}]},
-        HDR,
+        {"content": text},
     )
+
+
+def test_serve_agent_turn_and_activity(sup):
+    st, resp = _turn(sup, 'search "unsloth studio"')
     assert st == 200
     assert "[tool" not in resp["choices"][0]["message"]["content"]
     kinds = [e["kind"] for e in resp["clm_mem"]["events"]]
@@ -282,13 +286,7 @@ def test_serve_tools_state_and_toggle(sup):
     )
     assert st == 200 and not any(t.startswith("run_") for t in d["enabled_tools"])
     # exec now off -> a model call to run_command is refused, web still works
-    st, resp = http_call(
-        sup,
-        "/v1/chat/completions",
-        "POST",
-        {"messages": [{"role": "user", "content": 'run command "echo x"'}]},
-        HDR,
-    )
+    st, resp = _turn(sup, 'run command "echo x"')
     assert st == 200
 
     st, d = http_call(
@@ -371,13 +369,7 @@ def test_serve_approvals_round_trip(sup):
 
     t = threading.Thread(target=approver, daemon=True)
     t.start()
-    st, resp = http_call(
-        sup,
-        "/v1/chat/completions",
-        "POST",
-        {"messages": [{"role": "user", "content": 'run command "echo approved"'}]},
-        HDR,
-    )
+    st, resp = _turn(sup, 'run command "echo approved"')
     t.join(10)
     assert st == 200
     acts = http_call(sup, "/v1/clm/sessions/ws%3Aagent/activity?limit=4", headers=HDR)[
@@ -446,13 +438,7 @@ def test_cli_responder_approves_local_ask(tmp_path):
 
 
 def test_snapshot_carries_tool_state(sup):
-    http_call(
-        sup,
-        "/v1/chat/completions",
-        "POST",
-        {"messages": [{"role": "user", "content": "search hi"}]},
-        HDR,
-    )
+    _turn(sup, "search hi")
     st, snap = http_call(sup, "/v1/clm/sessions/ws%3Aagent/snapshot", headers=HDR)
     assert st == 200 and snap["tools"]["active"]
     assert snap["activity"] and snap["activity"][0]["tool"] == "web_search"

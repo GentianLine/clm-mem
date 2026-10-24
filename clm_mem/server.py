@@ -115,6 +115,13 @@ def chat_slot(chat: str) -> int:
     return int(m.group(1)) - 1 if m else -1
 
 
+def slot_to_chat(slot: int) -> str:
+    """Chat id for a zero-based slot; legacy (-1) renders inside chat-001."""
+    if slot < 0:
+        return "chat-001"
+    return f"chat-{slot + 1:03d}"
+
+
 def _exec_chat(h, chat: Optional[str]) -> Optional[str]:
     """Normalize a human-initiated call's chat tag against the session.
 

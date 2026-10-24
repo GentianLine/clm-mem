@@ -177,16 +177,16 @@ def test_discovery_and_llm_calls_carry_the_key(keyed):
     # context discovery (/props) needed auth too -- proof the key flows there
     assert sup.config.backend_ctx == 4096
 
-    # session (harness/OpenAIChat) path
+    # session (harness/OpenAIChat) path: explicit branch open + turn
+    st, _ = http_call(
+        sup, "/v1/clm/sessions", "POST", {"session": "ws:keyed", "model": "auth-model"}
+    )
+    assert st in (200, 201)
     st, resp = http_call(
         sup,
-        "/v1/chat/completions",
+        "/v1/clm/sessions/ws%3Akeyed/turns",
         "POST",
-        {
-            "model": "auth-model",
-            "messages": [{"role": "user", "content": "hello there"}],
-        },
-        headers={"X-Cllm-Mem-Session": "s-keyed"},
+        {"content": "hello there"},
     )
     assert st == 200, resp
     content = resp["choices"][0]["message"]["content"]

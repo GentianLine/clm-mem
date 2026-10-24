@@ -102,13 +102,7 @@ def test_workspace_lifecycle(sup):
     assert len(d["workspaces"]) == 1
     assert d["workspaces"][0]["active"] is False
 
-    http_call(
-        sup,
-        "/v1/chat/completions",
-        "POST",
-        {"messages": [{"role": "user", "content": "Remember: key KEY-7 port 8077"}]},
-        HDR,
-    )
+    _send(sup, "Remember: key KEY-7 port 8077", HDR)
     st, d = http_call(sup, "/v1/clm/workspaces")
     w = d["workspaces"][0]
     assert w["active"] and w["turn"] == 1 and w["counts"]["longterm"] >= 1
@@ -131,13 +125,7 @@ def test_workspace_name_validation(sup):
 # -- snapshot / blocks / archive / settings ------------------------------------
 def test_snapshot_block_archive_reinject_settings(sup):
     big = "z" * 800  # longer than the 320-char preview
-    http_call(
-        sup,
-        "/v1/chat/completions",
-        "POST",
-        {"messages": [{"role": "user", "content": f"Remember: id VAULT-9 {big}"}]},
-        HDR,
-    )
+    _send(sup, f"Remember: id VAULT-9 {big}", HDR)
 
     st, snap = http_call(sup, "/v1/clm/sessions/ws%3Aproj/snapshot")
     assert st == 200 and snap["turn"] == 1
@@ -171,13 +159,7 @@ def test_archive_search_and_reinject_flow(sup):
     filler = "chatter filler that eats tokens " * 20
     hdr = {"X-Cllm-Mem-Session": "ws:s2"}
     for i in range(6):
-        http_call(
-            sup,
-            "/v1/chat/completions",
-            "POST",
-            {"messages": [{"role": "user", "content": f"Quick note {i}: {filler}"}]},
-            hdr,
-        )
+        _send(sup, f"Quick note {i}: {filler}", hdr)
     st, d = http_call(sup, "/v1/clm/sessions/ws%3As2/archive?q=chatter&limit=5")
     assert st == 200 and len(d["hits"]) >= 1
     bid = d["hits"][0]["id"]
@@ -320,13 +302,7 @@ def test_remote_step_header_used(sup):
 
 # -- forgetting-strategy toggles (CLI flags ride the same settings route) ------
 def test_settings_forget_toggles(sup):
-    http_call(
-        sup,
-        "/v1/chat/completions",
-        "POST",
-        {"messages": [{"role": "user", "content": "hi there"}]},
-        HDR,
-    )
+    _send(sup, "hi there", HDR)
 
     st, snap = http_call(sup, "/v1/clm/sessions/ws%3Aproj/snapshot")
     assert snap["decay_enabled"] is False and snap["supersede_enabled"] is False
@@ -424,12 +400,19 @@ HDR2 = {"X-Cllm-Mem-Session": "ws:chats", "X-Cllm-Mem-Chat": "chat-001"}
 
 
 def _send(sup, text, hdr):
+    """Send a turn the explicit way: derive the branch (and chat slot)
+    from the legacy-style header dict callers already pass."""
+    sid = hdr.get("X-Cllm-Mem-Session", "")
+    chat = hdr.get("X-Cllm-Mem-Chat")
+    http_call(sup, "/v1/clm/sessions", "POST", {"session": sid})
+    body: dict = {"content": text}
+    if chat:
+        body["chat"] = chat
     return http_call(
         sup,
-        "/v1/chat/completions",
+        f"/v1/clm/sessions/{sid.replace(':', '%3A')}/turns",
         "POST",
-        {"model": "mock-model", "messages": [{"role": "user", "content": text}]},
-        hdr,
+        body,
     )
 
 
