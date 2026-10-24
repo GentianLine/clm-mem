@@ -129,9 +129,7 @@ def _turn(sup, sid, text, chat=None, **kw):
     if chat:
         body["chat"] = chat
     body.update(kw)
-    st, d = http_call(
-        sup, f"/v1/clm/sessions/{sid}/turns", "POST", body
-    )
+    st, d = http_call(sup, f"/v1/clm/sessions/{sid}/turns", "POST", body)
     return st, d
 
 
@@ -219,11 +217,7 @@ def test_chat_session_memory_and_status(sup):
         sup,
         "/v1/clm/sessions/ws:alice/turns",
         "POST",
-        {
-            "messages": [
-                {"role": "user", "content": "what was my API key? remember it"}
-            ]
-        },
+        {"messages": [{"role": "user", "content": "what was my API key? remember it"}]},
     )
     assert st == 200 and resp2["choices"][0]["message"]["content"]
 
@@ -650,7 +644,7 @@ def test_settings_budget_clamped_to_backend_ctx(tmp_path):
             s,
             "/v1/clm/sessions/ws%3Actx2/settings",
             "POST",
-            {"max_context_tokens": 2048}
+            {"max_context_tokens": 2048},
         )
         assert d["changed"]["max_context_tokens"] == 2048
         assert "note" not in d

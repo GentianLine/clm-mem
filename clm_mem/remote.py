@@ -20,7 +20,6 @@ import urllib.request
 from typing import Dict, List, Optional
 
 
-
 def _ns(d: Dict):
     """Lightweight object from a snapshot block dict."""
     from types import SimpleNamespace

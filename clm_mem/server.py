@@ -1161,9 +1161,7 @@ class ProxyHandler(BaseHTTPRequestHandler):
             if m.get("role") == "user":
                 cc = m.get("content")
                 if isinstance(cc, list):
-                    cc = " ".join(
-                        p.get("text", "") for p in cc if isinstance(p, dict)
-                    )
+                    cc = " ".join(p.get("text", "") for p in cc if isinstance(p, dict))
                     if str(cc).strip():
                         return str(cc)
                 elif str(cc or "").strip():
@@ -1208,7 +1206,10 @@ class ProxyHandler(BaseHTTPRequestHandler):
             if hasattr(h.llm, attr):
                 restore[attr] = getattr(h.llm, attr)
         try:
-            for attr, key in (("temperature", "temperature"), ("max_tokens", "max_tokens")):
+            for attr, key in (
+                ("temperature", "temperature"),
+                ("max_tokens", "max_tokens"),
+            ):
                 if body.get(key) is not None and attr in restore:
                     setattr(h.llm, attr, body[key])
             since = body.get("since_event_seq")
