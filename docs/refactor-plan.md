@@ -56,10 +56,16 @@ session state; the harness holds blocks + eviction + mirror files + tools.
    every layer and needs to be designed, not patched.
 8. **Unfinished spike work.** `spike/chat-isolation-seed` carries uncommitted
    changes (reheat access channels: `last_seen`, `reheat_scope=chat`) plus a
-   failing test (`test_phase3_ranks_by_value_when_decay_on`: new block's
-   `last_access=-19` stays higher than the older one under the
-   last-access-vs-seen semantics). Whatever direction we take, that branch
-   needs to land or be explicitly deferred.
+   failing test (`test_phase3_ranks_by_value_when_decay_on`). The failure is
+   semantic, not cosmetic: the test marks the *newer* block stale by setting
+   `last_access = turn - 20` (turn is 1, so last_access = -19), but the new
+   `eff_importance` freshness rule takes `max(last_access, last_seen)` and
+   `add()` stamps `last_seen=turn`, so the "stale" block reads as perfectly
+   fresh and phase-3 ranking ties/keeps it. The test's intent (weakest
+   effective importance offloads first) must be re-expressed under the two
+   access channels — e.g. set both `last_access` *and* `last_seen` stale, or
+   decide freshness never participates in phase-3 ranking. Whatever direction
+   we take, that branch needs to land or be explicitly deferred.
 
 ## 3. Goals (restated as design constraints)
 
