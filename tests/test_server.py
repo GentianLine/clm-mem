@@ -41,8 +41,11 @@ def sse_call(sup, path, body, headers=None):
     resp = urllib.request.urlopen(req, timeout=30)
     assert resp.headers.get("Content-Type", "").startswith("text/event-stream")
     text, done = "", False
+    events = []
     for raw_line in resp:
         line = raw_line.decode().strip()
+        if line == "event: clm-mem-event":
+            continue  # the matching `data:` line carries the payload
         if not line.startswith("data: "):
             continue
         payload = line[len("data: ") :]
@@ -52,6 +55,9 @@ def sse_call(sup, path, body, headers=None):
             done = True
             break
         obj = json.loads(payload)
+        if obj.get("object") == "clm-mem-event":
+            events.append(obj)
+            continue
         delta = obj["choices"][0]["delta"]
         text += delta.get("content", "") or ""
     resp.close()
@@ -102,12 +108,67 @@ def test_options_cors(sup):
     )
     resp = urllib.request.urlopen(req, timeout=30)
     assert resp.status == 204
-    assert "X-Cllm-Mem-Session" in (
-        resp.headers.get("Access-Control-Allow-Headers") or ""
+    allow = resp.headers.get("Access-Control-Allow-Headers") or ""
+    assert "Content-Type" in allow
+    # the retired header spellings are not offered anymore
+    assert "X-Cllm-Mem-Session" not in allow
+
+
+def _open_branch(sup, sid, **opts):
+    """Open a memory branch the explicit way (POST /v1/clm/sessions)."""
+    body = {"session": sid}
+    if opts:
+        body["options"] = opts
+    st, d = http_call(sup, "/v1/clm/sessions", "POST", body)
+    assert st in (200, 201), d
+    return d
+
+
+def _turn(sup, sid, text, chat=None, **kw):
+    body = {"content": text}
+    if chat:
+        body["chat"] = chat
+    body.update(kw)
+    st, d = http_call(
+        sup, f"/v1/clm/sessions/{sid}/turns", "POST", body
     )
+    return st, d
+
+
+def _legacy_headers():
+    return {"X-Cllm-Mem-Session": "ghost"}
 
 
 # -- chat: passthrough and memory-managed ---------------------------------------
+def test_legacy_headers_rejected_with_hint(sup):
+    """The retired header spellings earn a 410 pointing at the verbs."""
+    st, resp = http_call(
+        sup,
+        "/v1/chat/completions",
+        "POST",
+        {"model": "mock-model", "messages": [{"role": "user", "content": "hi"}]},
+        _legacy_headers(),
+    )
+    assert st == 410
+    assert "/v1/clm/sessions" in resp["error"]["message"]
+    # turns reject them too, and never create sessions from them
+    st, resp = http_call(
+        sup,
+        "/v1/clm/sessions/ws:ghost/turns",
+        "POST",
+        {"content": "hi"},
+        _legacy_headers(),
+    )
+    assert st == 410
+    st, resp = http_call(
+        sup,
+        "/v1/clm/sessions/ws:ghost/turns",
+        "POST",
+        {"content": "hi"},
+    )
+    assert st == 409  # unknown branch; turns never create one
+
+
 def test_chat_passthrough_without_session(sup):
     st, resp = http_call(
         sup,
@@ -137,96 +198,72 @@ def test_chat_streaming_passthrough(sup):
 
 
 def test_chat_session_memory_and_status(sup):
-    hdr = {"X-Cllm-Mem-Session": "alice"}
-    st, resp = http_call(
-        sup,
-        "/v1/chat/completions",
-        "POST",
-        {
-            "model": "mock-model",
-            "messages": [
-                {"role": "user", "content": "Remember: API key KEY-9 port 8090"}
-            ],
-        },
-        hdr,
-    )
+    # explicit branch open + turns: memory lives behind the session verbs
+    d = _open_branch(sup, "ws:alice")
+    assert d["created"] is True and d["session_id"] == "ws:alice"
+    st, resp = _turn(sup, "ws:alice", "Remember: API key KEY-9 port 8090")
     assert st == 200
     assert resp["choices"][0]["message"]["content"]
-    assert resp["clm_mem"]["session_id"] == "alice"
+    assert resp["session_id"] == "ws:alice"
+    assert resp["clm_mem"]["events"]  # turn chips ride along
 
-    st, status = http_call(sup, "/v1/clm/sessions/alice/status")
+    st, status = http_call(sup, "/v1/clm/sessions/ws:alice/status")
     assert st == 200
     assert status["turns"] == 1
     assert status["counts"]["longterm"] >= 1  # fact survived as longterm
     assert status["tokens"] <= 600  # budget respected
 
-    # second turn still works and reuses the same harness
+    # second turn still works and reuses the same harness (messages-array
+    # form accepted too)
     st, resp2 = http_call(
         sup,
-        "/v1/chat/completions",
+        "/v1/clm/sessions/ws:alice/turns",
         "POST",
         {
-            "model": "mock-model",
             "messages": [
                 {"role": "user", "content": "what was my API key? remember it"}
-            ],
+            ]
         },
-        hdr,
     )
     assert st == 200 and resp2["choices"][0]["message"]["content"]
 
-    st, status = http_call(sup, "/v1/clm/sessions/alice/status")
+    st, status = http_call(sup, "/v1/clm/sessions/ws:alice/status")
     assert status["turns"] == 2
     assert status["tokens"] <= 600
 
 
 def test_chat_session_streaming(sup):
-    hdr = {"X-Cllm-Mem-Session": "streamer"}
+    _open_branch(sup, "ws:streamer")
     text, done = sse_call(
         sup,
-        "/v1/chat/completions",
-        {
-            "model": "mock-model",
-            "stream": True,
-            "messages": [
-                {"role": "user", "content": "Remember: codename Aurora port 8042"}
-            ],
-        },
-        hdr,
+        "/v1/clm/sessions/ws:streamer/turns",
+        {"content": "Remember: codename Aurora port 8042", "stream": True},
     )
     assert done and text
-    st, status = http_call(sup, "/v1/clm/sessions/streamer/status")
+    st, status = http_call(sup, "/v1/clm/sessions/ws:streamer/status")
     assert st == 200 and status["turns"] == 1
 
 
 def test_session_list_reset_delete(sup):
-    hdr = {"X-Cllm-Mem-Session": "bob"}
-    http_call(
-        sup,
-        "/v1/chat/completions",
-        "POST",
-        {"model": "mock-model", "messages": [{"role": "user", "content": "hi there"}]},
-        hdr,
-    )
+    _open_branch(sup, "ws:bob")
+    _turn(sup, "ws:bob", "hi there")
 
     st, lst = http_call(sup, "/v1/clm/sessions")
-    assert st == 200 and "bob" in lst["sessions"]
+    assert st == 200 and "ws:bob" in lst["sessions"]
 
-    st, msg = http_call(sup, "/v1/clm/sessions/bob/reset", "POST")
-    assert st == 200 and msg["reset"] == "bob"
+    st, msg = http_call(sup, "/v1/clm/sessions/ws:bob/reset", "POST")
+    assert st == 200 and msg["reset"] == "ws:bob"
 
-    st, _ = http_call(sup, "/v1/clm/sessions/bob/status")
+    st, _ = http_call(sup, "/v1/clm/sessions/ws:bob/status")
     assert st == 404  # reset dropped it
 
-    http_call(
-        sup,
-        "/v1/chat/completions",
-        "POST",
-        {"model": "mock-model", "messages": [{"role": "user", "content": "hi again"}]},
-        hdr,
-    )
-    st, msg = http_call(sup, "/v1/clm/sessions/bob", "DELETE")
-    assert st == 200 and msg["deleted"] == "bob"
+    # turns on a dropped branch bounce 409: re-open to continue
+    st, resp = _turn(sup, "ws:bob", "hi again")
+    assert st == 409
+    _open_branch(sup, "ws:bob")
+    _turn(sup, "ws:bob", "hi again")
+    st, msg = http_call(sup, "/v1/clm/sessions/ws:bob", "DELETE")
+    assert st == 200 and msg["deleted"] == "ws:bob"
 
 
 def test_unknown_session_status_404(sup):
@@ -577,17 +614,9 @@ def test_budget_follows_backend_ctx(tmp_path):
         assert s.config.backend_ctx == 4096  # mock /props n_ctx
         st, health = http_call(s, "/health")
         assert health["backend_ctx"] == 4096
-        http_call(
-            s,
-            "/v1/chat/completions",
-            "POST",
-            {
-                "model": "mock-model",
-                "messages": [{"role": "user", "content": "hi there"}],
-            },
-            {"X-Cllm-Mem-Session": "ctx1"},
-        )
-        st, snap = http_call(s, "/v1/clm/sessions/ctx1/snapshot")
+        _open_branch(s, "ws:ctx1")
+        _turn(s, "ws:ctx1", "hi there")
+        st, snap = http_call(s, "/v1/clm/sessions/ws%3Actx1/snapshot")
         assert snap["budget"] == 4096
         assert snap["backend_ctx"] == 4096
     finally:
@@ -605,25 +634,23 @@ def test_settings_budget_clamped_to_backend_ctx(tmp_path):
         timeout=30,
     )
     try:
-        http_call(
-            s,
-            "/v1/chat/completions",
-            "POST",
-            {
-                "model": "mock-model",
-                "messages": [{"role": "user", "content": "hi there"}],
-            },
-            {"X-Cllm-Mem-Session": "ctx2"},
-        )
+        _open_branch(s, "ws:ctx2")
+        _turn(s, "ws:ctx2", "hi there")
         st, d = http_call(
-            s, "/v1/clm/sessions/ctx2/settings", "POST", {"max_context_tokens": 8192}
+            s,
+            "/v1/clm/sessions/ws%3Actx2/settings",
+            "POST",
+            {"max_context_tokens": 8192},
         )
         assert st == 200
         assert d["changed"]["max_context_tokens"] == 4096
         assert "clamped" in d["note"]
         # shrinking is fine and sticks
         st, d = http_call(
-            s, "/v1/clm/sessions/ctx2/settings", "POST", {"max_context_tokens": 2048}
+            s,
+            "/v1/clm/sessions/ws%3Actx2/settings",
+            "POST",
+            {"max_context_tokens": 2048}
         )
         assert d["changed"]["max_context_tokens"] == 2048
         assert "note" not in d

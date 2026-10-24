@@ -7,7 +7,7 @@ import math
 import os
 import re
 import time
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Union
 from .blocks import LONG, SHORT, TRANSIENT, VALID_TAGS, Block
 
 #: chat ids look like ``chat-001``
@@ -749,7 +749,12 @@ class MemoryHarness:
         return raw
 
     # -- top-level: one conversational turn ----------------------------------------
-    def step(self, user_text: str, chat_slot: Optional[int] = None) -> str:
+    def step(
+        self,
+        user_text: str,
+        chat_slot: Optional[int] = None,
+        since_event_seq: Optional[int] = None,
+    ) -> Union[str, Dict]:
         """Send a user message; returns the (tag-stripped) assistant reply.
 
         Side effects: eviction may run, files are mirrored, ``self.events`` grows.
@@ -760,9 +765,18 @@ class MemoryHarness:
         produced this turn (:func:`slot_to_chat` turns it back into a
         ``chat-001`` id); ``None`` keeps legacy behaviour where every turn
         belongs to the project's single implicit chat.
+
+        When ``since_event_seq`` is given (an inclusive lower bound on event
+        sequence numbers), the return is a dict instead of the bare reply
+        string: ``{"reply", "events"}`` -- events are this turn's structured
+        log entries with ``seq >= since_event_seq``, so a caller streaming
+        SSE sees exactly the chips this request produced even when two
+        requests share a branch. Omit it and the legacy string return
+        stands.
         """
         self.turn += 1
         self.slot = chat_slot if chat_slot is not None else -1
+        seq_floor = (self._seq + 1) if since_event_seq is None else since_event_seq
 
         # Pre-classify user request using SystemOne before sending to LLM
         tag = TRANSIENT
@@ -813,11 +827,15 @@ class MemoryHarness:
         self.mirror_files()
         for e in log:
             print(f"  [evict] {e['text']}")
-        return "\n".join(
+        reply = "\n".join(
             strip_tags(b.content)
             for b in self.blocks
             if b.role == "assistant" and b.turn == self.turn
         )
+        if since_event_seq is not None:
+            turn_events = [e for e in self.events if e["seq"] >= seq_floor]
+            return {"reply": reply, "events": turn_events}
+        return reply
 
     # -- introspection ---------------------------------------------------------------
     def live_blocks(self, tag: str = "") -> List[Block]:

@@ -4,9 +4,15 @@ To any OpenAI/llama.cpp client this is just *the* server: one host:port with
 ``/v1/chat/completions``, ``/v1/models``, ``/completion``, ``/props``,
 ``/metrics``, ``/version``, ``/health``. Behind it the supervisor spins up
 2-3 background processes (proxy + chat backend + optional System One
-decision server) and wires clm-mem's memory harness into every request that
-carries an ``X-Cllm-Mem-Session`` header, so clients like Unsloth Studio get
-long/short-term memory without knowing they have it.
+decision server).
+
+**Memory is explicit, never a header side effect.** A memory session is a
+*branch*: its own harness (live window + archive) and sandbox, addressed as
+``ws:<name>``. Clients open one with ``POST /v1/clm/sessions`` and converse
+through ``POST /v1/clm/sessions/<id>/turns`` (chat-completions-shaped,
+SSE-capable). ``/v1/chat/completions`` is pure passthrough -- the header
+spellings ``X-Cllm-Mem-Session`` / ``X-Cllm-Mem-Chat`` are gone; a request
+that still sends them gets an explicit 4xx pointing at the verb to use.
 
 Additionally, `serve` can host a built-in single-page web UI (the "studio":
 multi-project sidebar, chat pane with memory hints instead of raw context,
@@ -27,7 +33,7 @@ import threading
 import time
 import urllib.error
 import urllib.request
-from dataclasses import dataclass, field
+from dataclasses import asdict as _dc_asdict, dataclass, field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Dict, List, Optional
 from urllib.parse import parse_qs, unquote
@@ -38,8 +44,50 @@ from .tools import ToolCall
 from .processes import ProcessManager, free_port, render_flags
 
 VERSION = "0.3.0"
-SESSION_HEADER = "X-Cllm-Mem-Session"
-CHAT_HEADER = "X-Cllm-Mem-Chat"
+#: Legacy header spellings are NOT accepted: sending them is a 410 with a
+#: pointer to the explicit session verbs (see module docstring).
+LEGACY_HEADER_HINT = (
+    "header-driven memory was removed; open a branch with POST /v1/clm/sessions "
+    "and converse via POST /v1/clm/sessions/<id>/turns"
+)
+
+#: Per-request generation knobs a turn may carry (attributes on the
+#: harness's chat client); they belong to the request, not the branch.
+_TURN_LLM_ATTRS = ("temperature", "max_tokens")
+
+#: Optional overrides applied at session-open onto HarnessConfig. Only
+#: budget/policy-shaping knobs belong here -- they build the harness, so
+#: they are creation-time by design (per-request knobs like temperature
+#: stay per-request). Unknown keys are rejected with an explicit 400.
+OPEN_KNOBS = (
+    "max_context_tokens",
+    "shortterm_keep_pct",
+    "keep_recent_turns",
+    "offload_overflow",
+    "classify_mode",
+    "classifier_max_block_chars",
+    "classifier_max_tokens",
+    "systemone_evict_threshold",
+    "decay_enabled",
+    "decay_half_life",
+    "demote_threshold",
+    "reheat_boost",
+    "reheat_scope",
+    "supersede_enabled",
+    "supersede_fast",
+    "tools_enabled",
+    "sandbox_mode",
+    "approval_mode",
+    "max_tool_calls",
+    "tool_timeout",
+    "approval_timeout",
+    "search_provider",
+    "max_search_results",
+    "fetch_max_chars",
+    "exec_output_limit",
+    "tokenizer_name",
+    "memory_preamble",
+)
 NATIVE_GET_PATHS = ("/props", "/metrics", "/specs")
 NATIVE_POST_PATHS = ("/completion", "/embedding")
 
@@ -208,7 +256,7 @@ class ProxyHandler(BaseHTTPRequestHandler):
         self.send_header("Access-Control-Allow-Origin", "*")
         self.send_header(
             "Access-Control-Allow-Headers",
-            f"Content-Type, Authorization, {SESSION_HEADER}",
+            "Content-Type, Authorization, X-Cllm-Mem-Legacy-Session-Detect",
         )
         self.send_header("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
 
@@ -316,14 +364,25 @@ class ProxyHandler(BaseHTTPRequestHandler):
             self._respond_payload(status, payload, ctype)
 
     # -- sessions ----------------------------------------------------------
-    def _session_id(self, body: dict) -> Optional[str]:
-        sid = self.headers.get(SESSION_HEADER) or body.get("session_id")
-        return str(sid) if sid else None
+    def _legacy_headers_present(self) -> bool:
+        """True when a client sends the retired header spellings. Detection
+        is on purpose: an old client must hear *why* it failed, not a 404."""
+        return (
+            self.headers.get("X-Cllm-Mem-Session") is not None
+            or self.headers.get("X-Cllm-Mem-Chat") is not None
+        )
+
+    def _reject_legacy(self) -> None:
+        self.send_error_json(410, LEGACY_HEADER_HINT)
 
     def _harness_for(self, sid: str, model: str, chat: Optional[str] = None):
         return self.supervisor.harness_for(sid, model, chat=chat)
 
-    def _sse_reply(self, sid: str, model: str, reply: str):
+    def _sse_reply(self, sid: str, model: str, reply: str, events=None):
+        """Stream one turn as SSE: role chunk, content deltas, clm event
+        chunks (``event: clm-mem-event`` with the chip payload), then
+        ``[DONE]``. Used by the turns endpoint; the payload shape is the
+        contract clients parse."""
         self._start_sse()
         created = int(time.time())
 
@@ -350,6 +409,12 @@ class ProxyHandler(BaseHTTPRequestHandler):
         pieces = re.findall(r"\S+\s?|\s+", reply) or ([reply] if reply else [])
         for piece in pieces:
             chunk({"content": piece})
+        for ev in events or []:
+            payload = dict(ev)
+            payload["object"] = "clm-mem-event"
+            self.wfile.write(b"event: clm-mem-event\n")
+            self.wfile.write(f"data: {json.dumps(payload)}\n\n".encode())
+            self.wfile.flush()
         chunk({}, finish="stop")
         self.wfile.write(b"data: [DONE]\n\n")
         self.wfile.flush()
@@ -572,7 +637,50 @@ class ProxyHandler(BaseHTTPRequestHandler):
                 sids = list(sup.sessions)
             return self.send_json({"sessions": sids})
         sid = parts[3]
+        # a quoted colon (ws%3Aname) arrives as ONE path segment when the
+        # client percent-encodes it: re-split that segment so sub-resources
+        # (turns, snapshot, ...) land where the router expects them.
+        if "/" in parts[3]:
+            sub = [p for p in parts[3].split("/") if p]
+            parts = parts[:3] + sub
         action = parts[4] if len(parts) > 4 else "snapshot"
+        if action == "turns" and len(parts) == 6 and parts[5] == "turns":
+            # GET .../turns?chat=<c> -- replay one chat slot's transcript
+            h = sup.get_session(sid)
+            if h is None:
+                return self.send_error_json(404, f"unknown session {sid!r}")
+            chats = _chat_param(qd)
+            if not chats:
+                c = qd.get("chat", [""])[0]
+                chats = [c] if CHAT_RE.match(c) else None
+            full = qd.get("full", ["0"])[0].lower() in ("1", "true", "yes")
+            snap = h.snapshot(include_full=full, chats=chats)
+            only = set(chats) if chats else None
+            msgs = [
+                {
+                    "id": b["id"],
+                    "role": b["role"],
+                    "content": b.get("content", ""),
+                    "tag": b["tag"],
+                    "turn": b["turn"],
+                    "chat": b["chat"],
+                }
+                for b in snap["blocks"]
+                if b["role"] in ("user", "assistant")
+                and (only is None or b["chat"] in only)
+            ]
+            return self.send_json(
+                {
+                    "session_id": sid,
+                    "chats": snap.get("chats", []),
+                    "turns": msgs,
+                    "activity": [
+                        a
+                        for a in snap.get("activity", [])
+                        if only is None or a.get("chat") in only
+                    ],
+                }
+            )
         h = sup.get_session(sid)
         if action == "status":
             if h is None:
@@ -637,10 +745,74 @@ class ProxyHandler(BaseHTTPRequestHandler):
             except ValueError as exc:
                 return self.send_error_json(400, str(exc))
             return self.send_json(ws)
+        if len(parts) == 3 and parts[2] == "sessions":
+            # POST /v1/clm/sessions -- open a memory branch (explicit).
+            # Body: {session | workspace?, model?, <open knobs>...} or the
+            # knobs nested under `options`. The legacy header spellings are
+            # never honored, but their presence still earns the 410 hint.
+            if self._legacy_headers_present():
+                return self._reject_legacy()
+            ident = body.get("session") or body.get("workspace")
+            opts: Dict = dict(body.get("options") or {})
+            for k in list(body):
+                if k in OPEN_KNOBS:
+                    opts[k] = body[k]
+            sid: Optional[str] = None
+            if isinstance(ident, str) and ident.strip():
+                sid = str(ident).strip()
+            elif isinstance(body.get("workspace"), str):
+                w = str(body["workspace"]).strip()
+                sid = f"{WS_PREFIX}{w}" if WS_NAME_RE.fullmatch(w) else None
+            if sid is None:
+                return self.send_error_json(
+                    400,
+                    "session open needs 'session' (a ws:<name> branch id) or a"
+                    " valid 'workspace' name",
+                )
+            if not sid.startswith(WS_PREFIX):
+                return self.send_error_json(
+                    400,
+                    f"branch ids must be ws:<name>; got {sid!r}",
+                )
+            name = sid[len(WS_PREFIX) :]
+            if not WS_NAME_RE.fullmatch(name):
+                return self.send_error_json(400, f"invalid workspace name {name!r}")
+            model = str(body.get("model") or "")
+            try:
+                h = sup.harness_for(sid, model, overrides=opts)
+            except ValueError as exc:
+                return self.send_error_json(400, f"cannot open session: {exc}")
+            except Exception as exc:  # pragma: no cover - backend down
+                return self.send_error_json(503, f"cannot open session: {exc}")
+            created = getattr(h, "_branch_created", False)
+            with sup.lock:
+                m = dict(sup.meta.get(sid, {}))
+            cfgc = h.cfg
+            return self.send_json(
+                {
+                    "session_id": sid,
+                    "created": bool(created),
+                    "model": model or sup.config.served_model,
+                    "budget": cfgc.max_context_tokens,
+                    "status": h.status(),
+                    "counts": h.counts(),
+                    "tokens": h.tokens(),
+                    "archive": h.archive_size(),
+                    "chats": h.chat_slots(),
+                    "created_at": m.get("created_at"),
+                },
+                status=201 if created else 200,
+            )
         if parts[2] != "sessions" or len(parts) < 5:
             return self.send_error_json(404, f"no route for {path}")
         sid = parts[3]
-        action = parts[4]
+        # ws%3Aalice/turns arrives as ONE segment when percent-encoded:
+        # re-split that segment so sub-resources land where the router
+        # expects them (a bare ws:name keeps its single segment).
+        if "/" in parts[3]:
+            sub = [p for p in parts[3].split("/") if p]
+            parts = parts[:3] + sub
+        action = parts[4] if len(parts) > 4 else "snapshot"
         if action == "reset":
             # opening a new chat: retire the live window but keep the
             # project's memory (archive) and every other chat's state.
@@ -695,6 +867,8 @@ class ProxyHandler(BaseHTTPRequestHandler):
         ):
             h = sup.harness_for(sid)
             return self._clm_tools_post(h, sid, action, body)
+        if action == "turns":
+            return self._turns(sid, body)
         h = sup.get_session(sid)
         if h is None:
             return self.send_error_json(404, f"unknown session {sid!r}")
@@ -967,66 +1141,104 @@ class ProxyHandler(BaseHTTPRequestHandler):
             return self.send_error_json(400, str(exc))
         return self.send_error_json(404, f"no route for {self.path}")
 
-    # -- chat completions: passthrough or memory-managed ---------------------
-    def _chat_completions(self):
-        sup = self.supervisor
-        cfg = sup.config
-        raw = self.read_body_bytes()
-        try:
-            body = json.loads(raw.decode() or "{}")
-        except Exception:
-            self.send_error_json(400, "invalid JSON body")
-            return
-        sid = self._session_id(body)
-        chat = self.headers.get(CHAT_HEADER) or body.get("chat")
-        slot = chat_slot(str(chat).rsplit("/", 1)[-1] if chat else "")
-        model = body.get("model") or cfg.served_model
-
-        if not sid:  # plain llama.cpp client: passthrough
-            if not cfg.backend_root:
-                self.send_error_json(503, "no backend configured")
-                return
-            self._forward(
-                "POST",
-                f"{cfg.backend_root}/v1/chat/completions",
-                raw,
-                stream=bool(body.get("stream")),
-            )
-            return
-
+    # -- memory turns: the conversation verb ---------------------------------
+    @staticmethod
+    def _user_text_from(body: Dict) -> str:
+        """Accept `content` or a full OpenAI `messages` array (last user
+        message wins; multimodal parts are joined)."""
+        c = body.get("content")
+        if isinstance(c, str) and c.strip():
+            return c
         msgs = body.get("messages") or []
-        user_text = ""
         for m in reversed(msgs):
             if m.get("role") == "user":
-                c = m.get("content")
-                if isinstance(c, list):  # multimodal-ish parts
-                    c = " ".join(p.get("text", "") for p in c if isinstance(p, dict))
-                user_text = str(c)
-                break
+                cc = m.get("content")
+                if isinstance(cc, list):
+                    cc = " ".join(
+                        p.get("text", "") for p in cc if isinstance(p, dict)
+                    )
+                    if str(cc).strip():
+                        return str(cc)
+                elif str(cc or "").strip():
+                    return str(cc)
+        return ""
+
+    def _turns(self, sid: str, body: Dict):
+        """POST /v1/clm/sessions/<id>/turns -- add to the conversation.
+
+        Chat-completions-shaped but explicit: never creates a session (409
+        when the branch is unknown), accepts `content` or `messages`, and
+        answers with harness truth (`clm_mem` block, event chips). SSE when
+        `stream` is set -- deltas plus `clm-mem-event` chips, then [DONE].
+        """
+        sup = self.supervisor
+        cfg = sup.config
+        if self._legacy_headers_present():
+            return self._reject_legacy()
+        h = sup.get_session(sid)
+        if h is None:
+            return self.send_error_json(
+                409,
+                f"unknown session {sid!r}: open it first with POST"
+                " /v1/clm/sessions (turns never create sessions)",
+            )
+        user_text = self._user_text_from(body)
         if not user_text:
-            self.send_error_json(400, "session requests need a user message")
-            return
+            return self.send_error_json(400, "a turn needs a user message")
+        chat = body.get("chat")
+        slot: Optional[int] = None
+        if chat is not None:
+            c = str(chat).rsplit("/", 1)[-1]
+            if not CHAT_RE.match(c):
+                return self.send_error_json(400, f"invalid chat id {c!r}")
+            slot = chat_slot(c)
+        model = body.get("model") or sup.meta.get(sid, {}).get(
+            "model", cfg.served_model
+        )
+        # per-request generation knobs belong to the turn, not the branch
+        restore: Dict[str, object] = {}
+        for attr in _TURN_LLM_ATTRS:
+            if hasattr(h.llm, attr):
+                restore[attr] = getattr(h.llm, attr)
         try:
-            harness = self._harness_for(sid, model, chat=chat)
-        except Exception as exc:
-            self.send_error_json(503, f"cannot create session: {exc}")
-            return
-        try:
-            reply = harness.step(user_text, chat_slot=slot)
-        except TypeError:
-            # a harness (or wrapper) without chat attribution: legacy call
-            reply = harness.step(user_text)
-        except Exception as exc:
-            self.send_error_json(502, f"backend error during step: {exc}")
-            return
+            for attr, key in (("temperature", "temperature"), ("max_tokens", "max_tokens")):
+                if body.get(key) is not None and attr in restore:
+                    setattr(h.llm, attr, body[key])
+            since = body.get("since_event_seq")
+            floor: Optional[int] = None
+            if since is not None:
+                try:
+                    floor = int(since)
+                except (TypeError, ValueError):
+                    return self.send_error_json(
+                        400, "since_event_seq must be an integer"
+                    )
+            else:
+                floor = h._seq  # this turn's events start after the last seen
+            try:
+                out = h.step(user_text, chat_slot=slot, since_event_seq=floor)
+            except Exception as exc:
+                return self.send_error_json(502, f"backend error during step: {exc}")
+            if isinstance(out, dict):
+                reply = out["reply"]
+                events = out["events"]
+            else:  # a custom harness whose step() predates since_event_seq
+                reply = out
+                events = h.events[-8:]
+        finally:
+            for attr, val in restore.items():
+                if hasattr(h.llm, attr):
+                    setattr(h.llm, attr, val)
         if body.get("stream"):
-            self._sse_reply(sid, model, reply)
+            self._sse_reply(sid, model, reply, events=events)
             return
         payload = {
-            "id": "clm-mem-session",
+            "id": f"clm-mem-{sid}",
             "object": "chat.completion",
             "created": int(time.time()),
             "model": model,
+            "session_id": sid,
+            "chat": slot_to_chat(slot) if slot is not None else None,
             "choices": [
                 {
                     "index": 0,
@@ -1035,21 +1247,47 @@ class ProxyHandler(BaseHTTPRequestHandler):
                 }
             ],
             "usage": {
-                "prompt_tokens": harness.tokens(),
+                "prompt_tokens": h.tokens(),
                 "completion_tokens": max(1, len(reply) // 4),
-                "total_tokens": harness.tokens() + max(1, len(reply) // 4),
+                "total_tokens": h.tokens() + max(1, len(reply) // 4),
             },
             "clm_mem": {
-                "session_id": sid,
-                "status": harness.status(),
-                "counts": harness.counts(),
-                "tokens": harness.tokens(),
-                "budget": harness.cfg.max_context_tokens,
-                "archive": harness.archive_size(),
-                "events": harness.events[-8:],
+                "status": h.status(),
+                "counts": h.counts(),
+                "tokens": h.tokens(),
+                "budget": h.cfg.max_context_tokens,
+                "archive": h.archive_size(),
+                "events": events,
+                "chats": h.chat_slots(),
             },
         }
         self.send_json(payload)
+
+    # -- chat completions: pure passthrough ------------------------------------
+    def _chat_completions(self):
+        """Backend passthrough. Memory no longer rides on this endpoint:
+        branch clients use POST /v1/clm/sessions/<id>/turns instead.
+        Legacy header senders get a 410 pointing at the verb."""
+        sup = self.supervisor
+        cfg = sup.config
+        raw = self.read_body_bytes()
+        try:
+            body = json.loads(raw.decode() or "{}")
+        except Exception:
+            self.send_error_json(400, "invalid JSON body")
+            return
+        if self._legacy_headers_present():
+            self._reject_legacy()
+            return
+        if not cfg.backend_root:
+            self.send_error_json(503, "no backend configured")
+            return
+        self._forward(
+            "POST",
+            f"{cfg.backend_root}/v1/chat/completions",
+            raw,
+            stream=bool(body.get("stream")),
+        )
 
 
 class Supervisor:
@@ -1062,6 +1300,10 @@ class Supervisor:
         self.manager = manager
         self.config = config
         self.sessions: Dict[str, MemoryHarness] = {}
+        #: Branch metadata beside each harness (created_at, last_used, chat
+        #: slots seen, open-time config template). Fork/lineage fields
+        #: (`from`/parent) belong here when sharing gets designed.
+        self.meta: Dict[str, Dict] = {}
         self.lock = threading.Lock()
         self.thread = threading.Thread(
             target=server.serve_forever, daemon=True, name="clm-mem-proxy"
@@ -1082,12 +1324,23 @@ class Supervisor:
         return self.base_url if self.config.ui_enabled else None
 
     # -- sessions ---------------------------------------------------------
-    def harness_for(self, sid: str, model: str = "", chat: Optional[str] = None):
+    def harness_for(
+        self,
+        sid: str,
+        model: str = "",
+        chat: Optional[str] = None,
+        overrides: Optional[Dict] = None,
+    ):
         """Get-or-create the :class:`MemoryHarness` behind a session id.
 
         ``ws:<name>`` sessions get their own project sandbox under
         ``<workdir>/workspaces/<name>`` so multiple projects never share
         context/archive files. Thread-safe (double-checked creation).
+
+        ``overrides`` are open-time :data:`OPEN_KNOBS` merged over the
+        server defaults -- they only apply when a branch is *created*;
+        reopening an existing branch leaves its live config alone (the
+        turns/settings endpoints own that).
         """
         with self.lock:
             h = self.sessions.get(sid)
@@ -1095,6 +1348,11 @@ class Supervisor:
                 return h
         cfg = self.config
         kwargs = dict(cfg.harness_kwargs or {})
+        if overrides:
+            bad = [k for k in overrides if k not in OPEN_KNOBS]
+            if bad:
+                raise ValueError(f"unknown open-time knob(s): {', '.join(bad)}")
+            kwargs.update({k: overrides[k] for k in overrides if k in OPEN_KNOBS})
         if sid.startswith(WS_PREFIX):
             kwargs["workdir"] = self.ws_dir(sid[len(WS_PREFIX) :])
             os.makedirs(kwargs["workdir"], exist_ok=True)
@@ -1119,18 +1377,47 @@ class Supervisor:
             systemone = SystemOneClient(
                 cfg.systemone_endpoint, model=cfg.systemone_model, api_key=syskey
             )
-        h = MemoryHarness(llm, HarnessConfig(**kwargs), systemone=systemone)
+        try:
+            harness_cfg = HarnessConfig(**kwargs)
+        except TypeError as exc:  # a knob the config does not accept
+            raise ValueError(f"invalid session options: {exc}") from None
+        if (
+            cfg.backend_ctx
+            and not (cfg.harness_kwargs or {}).get("max_context_tokens")
+            and "max_context_tokens" not in kwargs
+        ):
+            pass  # lockstep already applied via harness_kwargs above
+        if cfg.backend_ctx and harness_cfg.max_context_tokens > cfg.backend_ctx:
+            # llama.cpp fixes its window at load time: the budget follows,
+            # never exceeds (same clamp rule as the settings endpoint).
+            harness_cfg.max_context_tokens = cfg.backend_ctx
+        h = MemoryHarness(llm, harness_cfg, systemone=systemone)
         with self.lock:
             existing = self.sessions.get(sid)  # another thread raced us
+            created = existing is None
             if existing is not None:
                 h = existing
             else:
                 self.sessions[sid] = h
+                self.meta[sid] = {
+                    "created_at": time.time(),
+                    "last_used": time.time(),
+                    "model": model or cfg.served_model,
+                    "config_template": _dc_asdict(harness_cfg),
+                }
+            m = self.meta.setdefault(
+                sid,
+                {"created_at": time.time(), "last_used": time.time(), "chats": set()},
+            )
+            m["last_used"] = time.time()
             if chat:  # register the slot so an empty chat appears in listings
+                c = str(chat).rsplit("/", 1)[-1]
                 try:
-                    h.remember_chat_slot(str(chat).rsplit("/", 1)[-1])
+                    h.remember_chat_slot(c)
                 except Exception:
                     pass
+                m.setdefault("chats", set()).add(c)
+            h._branch_created = created  # type: ignore[attr-defined]
             return h
 
     def get_session(self, sid: str):
@@ -1139,6 +1426,7 @@ class Supervisor:
 
     def drop_session(self, sid: str) -> bool:
         with self.lock:
+            self.meta.pop(sid, None)
             return self.sessions.pop(sid, None) is not None
 
     # -- workspaces (project sandboxes) ----------------------------------------
@@ -1228,6 +1516,7 @@ class Supervisor:
             pass
         with self.lock:
             self.sessions.clear()
+            self.meta.clear()
         self.manager.shutdown()
 
     def __enter__(self):

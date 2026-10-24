@@ -7,6 +7,10 @@ sessions to it with:  clm-mem chat --connect http://host:port
 Everything the web UI can do per workspace (status, tag listings, archive
 search, reinject, live keep-pct) is available at the prompt through the same
 REST API the studio's app.js uses.
+
+Memory is explicit end to end: :meth:`RemoteHarness.open` creates (or
+reopens) a branch via ``POST /v1/clm/sessions``, :meth:`turn` converses
+through ``POST .../turns``. ``step()`` stays as sugar over them.
 """
 
 from __future__ import annotations
@@ -14,7 +18,7 @@ import json
 import urllib.error
 import urllib.request
 from typing import Dict, List, Optional
-from .server import SESSION_HEADER
+
 
 
 def _ns(d: Dict):
@@ -65,7 +69,10 @@ class RemoteConfig:
 
 
 class RemoteHarness:
-    """Talks to a live serve session over its REST API (same library underneath)."""
+    """Talks to a live serve session over its REST API (same library
+    underneath). The contract is explicit: :meth:`open` creates or reopens
+    the branch, :meth:`turn` adds to the conversation; ``step()`` is sugar
+    that opens once then turns."""
 
     def __init__(self, base_url: str, session: str = "ws:cli", api_key: str = "EMPTY"):
         # base_url: the OpenAI-style public base, e.g. http://127.0.0.1:8080/v1
@@ -78,6 +85,7 @@ class RemoteHarness:
             else self.base_url
         )
         self.root = root
+        self._opened = False  # open() flips it; step() opens once if unset
         self.cfg = RemoteConfig(self, {})
 
     # -- transport -----------------------------------------------------------
@@ -118,16 +126,49 @@ class RemoteHarness:
         self.cfg = RemoteConfig(self, snap)
         return self
 
+    # -- session lifecycle -----------------------------------------------------
+    def open(self, options: Optional[Dict] = None, model: str = "") -> Dict:
+        """Open (or reopen) this branch. Idempotent: reopening returns the
+        live session with ``created: false``. Options are creation-time
+        only -- a reopen never reshapes an existing branch."""
+        body: Dict[str, object] = {"session": self.session}
+        if model:
+            body["model"] = model
+        if options:
+            body["options"] = options
+        return self._req("POST", "/v1/clm/sessions", body)
+
+    def opened(self) -> bool:
+        return bool(getattr(self, "_opened", False))
+
     # -- harness-shaped surface -------------------------------------------------
-    def step(self, user_text: str) -> str:
-        resp = self._req(
-            "POST",
-            "/v1/chat/completions",
-            {
-                "messages": [{"role": "user", "content": user_text}],
-            },
-            extra_headers={SESSION_HEADER: self.session},
-        )
+    def turn(
+        self,
+        user_text: str,
+        chat: Optional[str] = None,
+        temperature: Optional[float] = None,
+        max_tokens: Optional[int] = None,
+    ) -> Dict:
+        """One conversational turn on an opened branch; returns the server's
+        full payload (reply under ``choices``, harness truth under
+        ``clm_mem``). Raises RuntimeError when the branch was never
+        opened -- turns do not create sessions."""
+        body: Dict[str, object] = {"content": user_text}
+        if chat:
+            body["chat"] = chat
+        if temperature is not None:
+            body["temperature"] = temperature
+        if max_tokens is not None:
+            body["max_tokens"] = max_tokens
+        return self._req("POST", f"{self._snap_path}/turns", body)
+
+    def step(self, user_text: str, chat: Optional[str] = None) -> str:
+        """Sugar: open (once per instance), turn, re-prime knobs from the
+        reply. Returns just the assistant text."""
+        if not self.opened():
+            self.open()
+            self._opened = True
+        resp = self.turn(user_text, chat=chat)
         reply = resp["choices"][0]["message"]["content"]
         # pull live settings/budget so local knobs mirror the server truth
         snap = self.snapshot()
