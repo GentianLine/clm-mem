@@ -154,6 +154,7 @@ class MemoryHarness:
             pinned=pinned,
             importance=BASE_IMPORTANCE.get(tag, 0.3),
             last_access=self.turn,
+            last_seen=self.turn,
         )
         self._next_id += 1
         self.blocks.append(b)
@@ -271,8 +272,13 @@ class MemoryHarness:
     # contradicts what is already stored. Both are pure local heuristics --
     # no model calls -- so they stay deterministic and cheap.
     def eff_importance(self, b: Block) -> float:
-        """Importance discounted by turns since last access (half-life curve)."""
-        gap = max(0, self.turn - b.last_access)
+        """Importance discounted by turns since last access (half-life curve).
+
+        Freshness is the best of both access channels: a fact seen in another
+        chat hasn't gone stale for the project, so cross-chat touches hold it
+        steady even when ``reheat_scope='chat'`` denies that touch a lift.
+        """
+        gap = max(0, self.turn - max(b.last_access, b.last_seen))
         return b.importance * math.pow(0.5, gap / self.cfg.decay_half_life)
 
     @staticmethod
@@ -289,18 +295,56 @@ class MemoryHarness:
         return vals
 
     def reheat(self, text: str) -> int:
-        """Access event: blocks whose identifiers appear in ``text`` warm up."""
+        """Access event: blocks whose identifiers appear in ``text`` warm up.
+
+        Two access channels per block: *own-chat* access (the transcript slot
+        that produced the fact touched it again) and *cross-chat* access.
+        Under ``reheat_scope='global'`` both lift importance -- hot facts stay
+        hot project-wide. Under ``'chat'`` only own-chat access lifts; a
+        cross-chat touch still refreshes freshness (``last_seen``) without
+        raising value, so another chat can keep a fact from going stale but
+        cannot resurrect it.
+
+        Under ``'fresh'`` every touch -- in this session or any other --
+        refreshes *both* freshness channels globally, but no touch ever
+        lifts importance: access can stop decay anywhere, reheat nowhere.
+        Hot and fresh stay global; the current session's window is never
+        warmed back up by access alone.
+        """
         vals = self._key_values(text)
         if not vals:
             return 0
         n = 0
         for b in self.blocks:
-            if b.pinned or b.last_access == self.turn:
+            if b.pinned:
                 continue
-            if MemoryHarness._key_values(b.content) & vals:
+            if not MemoryHarness._key_values(b.content) & vals:
+                continue
+            own = self.slot >= 0 and b.chat_slot == self.slot
+            if self.cfg.reheat_scope == "fresh":
+                # global hot & fresh, no reheat anywhere (not even here)
+                if max(b.last_access, b.last_seen) >= self.turn:
+                    continue  # already touched this turn
                 b.last_access = self.turn
-                b.importance = min(1.0, b.importance + self.cfg.reheat_boost)
+                b.last_seen = self.turn
                 n += 1
+                continue
+            if own:
+                if b.last_access == self.turn:
+                    continue  # already lifted this turn
+                b.last_access = self.turn
+                n += 1
+            else:
+                if self.cfg.reheat_scope != "global":
+                    if b.last_seen == self.turn:
+                        continue
+                    b.last_seen = self.turn
+                    continue
+                if b.last_access == self.turn or b.last_seen == self.turn:
+                    continue  # already lifted this turn
+                b.last_access = self.turn
+                n += 1
+            b.importance = min(1.0, b.importance + self.cfg.reheat_boost)
         return n
 
     def _decay_demote(self, log: List[Dict]) -> None:
@@ -733,7 +777,12 @@ class MemoryHarness:
         if self.cfg.decay_enabled:
             n = self.reheat(user_text)
             if n:
-                self._event("maintain-reheat", f"reheated {n} block(s) on access")
+                verb = (
+                    "kept fresh (no lift)"
+                    if self.cfg.reheat_scope == "fresh"
+                    else "reheated"
+                )
+                self._event("maintain-reheat", f"{verb} {n} block(s) on access")
 
         self.evict()  # room BEFORE generating
         agent_raw = self._agent_turn() if self.tools.active else None
@@ -837,6 +886,7 @@ class MemoryHarness:
             "shortterm_keep_pct": self.cfg.shortterm_keep_pct,
             "decay_enabled": self.cfg.decay_enabled,
             "supersede_enabled": self.cfg.supersede_enabled,
+            "reheat_scope": self.cfg.reheat_scope,
             "decay_half_life": self.cfg.decay_half_life,
             "demote_threshold": self.cfg.demote_threshold,
             "archive": self.archive_size(),
@@ -891,6 +941,32 @@ class MemoryHarness:
         """Register a chat slot the UI opened (before its first message)."""
         if CHAT_RE_P.match(chat or ""):
             self.known_chats.add(chat)
+
+    def remember(
+        self, text: str, chat: Optional[str] = None, pinned: bool = False
+    ) -> Dict:
+        """Seed a longterm fact straight into the live window.
+
+        This is how a chat born with memories gets them: a block tagged
+        ``longterm`` (and optionally pinned so eviction can't touch it),
+        attributed to *chat* when given. Classification/eviction treat it
+        exactly like an LLM-classified longterm block from then on.
+        """
+        text = (text or "").strip()
+        if not text:
+            return {"ok": False, "error": "empty fact"}
+        slot: Optional[int] = None
+        if chat and CHAT_RE_P.match(chat):
+            self.known_chats.add(chat)
+            slot = int(CHAT_RE_P.match(chat).group(1)) - 1
+        b = self.add("user", text, tag=LONG, pinned=pinned, slot=slot)
+        self.mirror_files()
+        return {
+            "ok": True,
+            "block_id": b.id,
+            "tag": b.tag,
+            "chat": slot_to_chat(b.chat_slot),
+        }
 
     def counts(self) -> Dict[str, int]:
         out = {LONG: 0, SHORT: 0, TRANSIENT: 0}

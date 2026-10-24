@@ -51,7 +51,7 @@ function setChatFor(s) {
   for (const c of s.split("/")) if (CHAT_RE.test(c)) m.set(c, true);
   return m;
 }
-const draftKey = () => `${sid()}/${state.chat}`;
+const draftKey = (s) => `${sid()}/${s || state.chat}`;
 const esc = (s) => s.replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
 
 /* ---------- scrolling ------------------------------------------------------
@@ -103,8 +103,14 @@ function setView(view) {
   if (view === "side") loadWorkspaces(false);
   if (view === "chat") {
     const t = $("input");
-    // re-attaching the field must not resurrect another chat's draft
-    if (t.dataset.key !== draftKey()) { t.value = ""; autoGrow(); }
+    // swap in the active chat's own draft; a field tagged for another chat
+    // must never show this chat's text (or keep its own when it shouldn't)
+    const tag = String(t.dataset.key || "");
+    const tail = tag.split("/").pop();
+    const holdsOther = CHAT_RE.test(tail) && tag !== draftKey();
+    t.value = holdsOther ? "" : (state.drafts[draftKey()] || "");
+    if (!holdsOther) t.dataset.key = draftKey();
+    autoGrow();
     t.focus();
   }
 }
@@ -144,7 +150,21 @@ async function loadWorkspaces(selectFirst = false) {
     d = await req("GET", "/v1/clm/workspaces");
   }
   const cur = d.workspaces.find((w) => w.name === state.ws);
-  state.chats = ((cur && cur.chats) || []).filter((c) => CHAT_RE.test(c));
+  const chats = ((cur && cur.chats) || []).filter((c) => CHAT_RE.test(c));
+  // never drop a slot the UI opened locally but the server listing hasn't
+  // caught up with yet (e.g. a chat just born via chat-open)
+  for (const c of state.chat.split("/")) {
+    if (CHAT_RE.test(c) && !chats.includes(c)) chats.push(c);
+  }
+  const wasActive = state.ws !== null && cur
+    && !state.chats.includes(state.chat);
+  const activeKey = state.chat;
+  state.chats = chats;
+  if (wasActive && CHAT_RE.test(activeKey)) {
+    // the chat we're sitting in must survive a refresh: re-open it under its
+    // own key so nested transcript/draft swaps stay consistent
+    await openChat(state.ws, activeKey).catch(() => {});
+  }
   renderWorkspaces(d.workspaces);
   if (selectFirst && d.workspaces.length) {
     selectWorkspace(d.workspaces[0].name, true);
@@ -233,7 +253,16 @@ function clearChatView() {
 function captureDraft() {
   if (!state.ws) return;
   const t = $("input");
-  // only fields currently holding *this* chat's draft may stash it
+  // the textarea is tagged with the chat whose text it holds; stash under
+  // that tag even if state.chat already moved to another slot (a stale
+  // field must never overwrite the caller's chat draft)
+  const parts = String(t.dataset.key || "").split("/");
+  const tail = parts[parts.length - 1];
+  if (t.dataset.key && CHAT_RE.test(tail)) {
+    state.drafts[t.dataset.key] = t.value;
+    return;
+  }
+  // untagged field: only stash for the chat it genuinely belongs to
   if (t.dataset.key !== draftKey()) return;
   state.drafts[draftKey()] = t.value;
 }
@@ -243,9 +272,10 @@ async function openChat(name, key) {
   if (!name || !CHAT_RE.test(key)) return;
   const wsSwitch = name !== state.ws;
   captureDraft();
-  if (wsSwitch) await selectWorkspaceInternal(name, true);
+  if (wsSwitch) await selectWorkspaceInternal(name, false);
   if (state.ws !== name) return;
   state.chat = key;
+  if (!state.chats.includes(key)) state.chats.push(key);
   clearChatView();
   try {
     // register the slot server-side so an empty chat still lists itself
@@ -288,8 +318,12 @@ async function selectWorkspace(name, refreshPanels = true) {
   }
 }
 async function selectWorkspaceInternal(name, refreshPanels = true) {
+  if (state.ws === name && !refreshPanels) return;  // already there: don't clobber the caller's chat
   state.ws = name;
-  state.chat = "chat-001";
+  // land on the newest registered chat: a seeded chat born via chat-open
+  // must be the active one after a reload (its seeds are its whole history)
+  const known = state.chats.filter((c) => CHAT_RE.test(c));
+  state.chat = known.length ? known.sort()[known.length - 1] : "chat-001";
   clearChatView();
   try {
     const snap = await req("GET", `/v1/clm/sessions/${encodeURIComponent(sid())}/snapshot` + chatQs());
@@ -526,7 +560,7 @@ function toolCard(entry) {
   return wrap;
 }
 
-const chatQs = () => `?chats=${encodeURIComponent(state.chat)}`;
+const chatQs = (s) => `?chats=${encodeURIComponent(s || state.chat)}`;
 async function fullActivity() {
   if (!state.fullCache) {
     state.fullCache = req("GET",
@@ -798,6 +832,8 @@ function primeTuning(snap) {
   $("keepOut").textContent = Math.round((snap.shortterm_keep_pct || 0.5) * 100) + "%";
   $("decayOn").checked = !!snap.decay_enabled;
   $("supOn").checked = !!snap.supersede_enabled;
+  const sel = $("reheatScope");
+  if (sel) sel.value = snap.reheat_scope || "global";
   const inp = $("budgetInput");
   inp.value = snap.budget;
   // the llama.cpp window is fixed when the backend loads; the harness budget
@@ -874,14 +910,19 @@ document.addEventListener("DOMContentLoaded", () => {
     const ws = state.ws;
     captureDraft();   // the chat we leave keeps its draft in state.drafts
     try {
-      const next = `chat-${String(state.chats.length + 1).padStart(3, "0")}`;
+      let next = `chat-${String(state.chats.length + 1).padStart(3, "0")}`;
+      const known = new Set(state.chats);
+      while (known.has(next)) {
+        next = `chat-${String(parseInt(next.slice(5), 10) + 1).padStart(3, "0")}`;
+      }
       await req("POST", `/v1/clm/sessions/${encodeURIComponent(sid())}/reset`,
-        { chats: [next] });
+        { chats: state.chats.concat([next]) });
       state.events = [];
       clearChatView();
       // a brand-new chat never inherits the previous one's draft
-      delete state.drafts[`ws:${ws}/${next}`];
+      delete state.drafts[sid() + "/" + next];
       state.chat = next;
+      if (!state.chats.includes(next)) state.chats.push(next);
       // register the fresh slot so it lists itself before its first message
       await req("POST", `/v1/clm/sessions/${encodeURIComponent(sid())}/chat-open`,
         { chat: next });
@@ -954,6 +995,16 @@ document.addEventListener("DOMContentLoaded", () => {
   $("supOn").addEventListener("change", async (e) => {
     await applySetting({ supersede_enabled: e.target.checked });
     toast(`supersession ${e.target.checked ? "on" : "off"}`);
+  });
+  const SCOPE_TOAST = {
+    chat: "reheating: chat-scoped (other chats only keep facts fresh)",
+    fresh:
+      "reheating: fresh-only (global hot & fresh, access never lifts)",
+    global: "reheating: global (hot facts stay hot everywhere)",
+  };
+  $("reheatScope").addEventListener("change", async (e) => {
+    await applySetting({ reheat_scope: e.target.value });
+    toast(SCOPE_TOAST[e.target.value] || SCOPE_TOAST.global);
   });
 
   // agent toggles in the composer (per-project, applied live) ---------------

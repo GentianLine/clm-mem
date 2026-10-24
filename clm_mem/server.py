@@ -320,8 +320,8 @@ class ProxyHandler(BaseHTTPRequestHandler):
         sid = self.headers.get(SESSION_HEADER) or body.get("session_id")
         return str(sid) if sid else None
 
-    def _harness_for(self, sid: str, model: str):
-        return self.supervisor.harness_for(sid, model)
+    def _harness_for(self, sid: str, model: str, chat: Optional[str] = None):
+        return self.supervisor.harness_for(sid, model, chat=chat)
 
     def _sse_reply(self, sid: str, model: str, reply: str):
         self._start_sse()
@@ -655,12 +655,34 @@ class ProxyHandler(BaseHTTPRequestHandler):
             existed = sup.drop_session(sid)
             return self.send_json({"reset": sid, "existed": existed})
         if action == "chat-open":
-            h = sup.harness_for(sid)
             chat = str(body.get("chat", ""))
             if not CHAT_RE.match(chat):
                 return self.send_error_json(400, f"invalid chat id {chat!r}")
-            h.remember_chat_slot(chat)
-            return self.send_json({"session_id": sid, "chat": chat, "ok": True})
+            h = sup.harness_for(sid, "", chat=chat)
+            seeded = body.get("seed") or []
+            if isinstance(seeded, str):
+                seeded = [seeded]
+            out = []
+            for s in seeded:
+                s = str(s).strip()
+                if not s:
+                    continue
+                res = h.remember(s, chat=chat, pinned=True)
+                ok = res.get("ok") if isinstance(res, dict) else True
+                bid = (
+                    res.get("block_id", res.get("id"))
+                    if isinstance(res, dict)
+                    else None
+                )
+                out.append({"ok": bool(ok), "block_id": bid})
+            return self.send_json(
+                {
+                    "session_id": sid,
+                    "chat": chat,
+                    "ok": True,
+                    "seeded": out,
+                }
+            )
         # the agent surface creates its session on demand: toggling tools or
         # poking the sandbox before a first message is legitimate UX.
         if action in (
@@ -756,6 +778,20 @@ class ProxyHandler(BaseHTTPRequestHandler):
                 )
                 setattr(h.cfg, k, val)
                 changed[k] = val
+            # reheat access model: 'global' (hot everywhere), 'chat' (only
+            # the fact's own chat lifts it; others just keep it fresh) or
+            # 'fresh' (global hot & fresh, but access never lifts anywhere --
+            # no reheat for the current session either)
+            v = body.get("reheat_scope")
+            if v is not None:
+                scope = str(v).lower()
+                if scope not in ("global", "chat", "fresh"):
+                    return self.send_error_json(
+                        400,
+                        "reheat_scope must be 'global', 'chat' or 'fresh'",
+                    )
+                h.cfg.reheat_scope = scope
+                changed["reheat_scope"] = scope
             return self.send_json(
                 {"session_id": sid, "changed": changed, "status": h.status()}
             )
@@ -971,7 +1007,7 @@ class ProxyHandler(BaseHTTPRequestHandler):
             self.send_error_json(400, "session requests need a user message")
             return
         try:
-            harness = self._harness_for(sid, model)
+            harness = self._harness_for(sid, model, chat=chat)
         except Exception as exc:
             self.send_error_json(503, f"cannot create session: {exc}")
             return
@@ -1046,7 +1082,7 @@ class Supervisor:
         return self.base_url if self.config.ui_enabled else None
 
     # -- sessions ---------------------------------------------------------
-    def harness_for(self, sid: str, model: str = ""):
+    def harness_for(self, sid: str, model: str = "", chat: Optional[str] = None):
         """Get-or-create the :class:`MemoryHarness` behind a session id.
 
         ``ws:<name>`` sessions get their own project sandbox under
@@ -1087,8 +1123,14 @@ class Supervisor:
         with self.lock:
             existing = self.sessions.get(sid)  # another thread raced us
             if existing is not None:
-                return existing
-            self.sessions[sid] = h
+                h = existing
+            else:
+                self.sessions[sid] = h
+            if chat:  # register the slot so an empty chat appears in listings
+                try:
+                    h.remember_chat_slot(str(chat).rsplit("/", 1)[-1])
+                except Exception:
+                    pass
             return h
 
     def get_session(self, sid: str):

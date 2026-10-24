@@ -39,6 +39,17 @@ class HarnessConfig:
     decay_half_life: int = 8  # turns for importance to halve without access
     demote_threshold: float = 0.45  # effective importance below which long -> short
     reheat_boost: float = 0.15  # importance bump on access (capped at 1.0)
+    # Access model for reheating. ``global`` (default): a fact touched in any
+    # chat warms up everywhere -- hot facts stay hot project-wide. ``chat``:
+    # only touches inside the fact's own chat reheat it; other chats' access
+    # still counts as freshness (no decay penalty accrues) but never lifts or
+    # bumps importance, so a foreign chat can't resurrect a cold fact.
+    # ``fresh``: global hot & fresh with *no* reheat -- every touch anywhere
+    # refreshes both freshness channels (nothing goes stale while the project
+    # uses it), but access never raises importance, not even in the fact's
+    # own session: use keeps facts warm, access alone never resurrects or
+    # boosts them.
+    reheat_scope: str = "global"  # global | chat | fresh
     # Strategy 2: supersede -- updates and duplicates overwrite older longterm.
     # A new fact sharing a subject slot with an older one supersedes it; an
     # exact duplicate is dropped at write time instead of admitted twice.
@@ -81,6 +92,8 @@ class HarnessConfig:
             raise ValueError("demote_threshold must be in [0, 1)")
         if not 0.0 <= self.reheat_boost <= 1.0:
             raise ValueError("reheat_boost must be in [0, 1]")
+        if self.reheat_scope not in ("global", "chat", "fresh"):
+            raise ValueError("reheat_scope must be global | chat | fresh")
         if self.sandbox_mode not in ("off", "jail", "docker"):
             raise ValueError("sandbox_mode must be off | jail | docker")
         if self.approval_mode not in ("auto", "ask", "deny"):

@@ -116,13 +116,22 @@ TOOLS: List[Dict] = [
             "Enable/disable the forgetting strategies live: decay "
             "(forgetting-curve demotion of stale longterm plus "
             "value-ranked offload) and supersede (updates overwrite "
-            "older longterm, duplicates dropped at write time). "
+            "older longterm, duplicates dropped at write time). Also sets "
+            "reheat scope: 'global' (a touch in any chat lifts a fact's "
+            "importance everywhere), 'chat' (only the fact's own chat "
+            "lifts; other chats merely keep it from going stale) or "
+            "'fresh' (touches anywhere keep facts fresh but never lift "
+            "importance -- global hot & fresh, no reheat). "
             "Omitted flags leave the current state untouched."
         ),
         "inputSchema": _obj(
             {
                 "decay": {"type": "boolean"},
                 "supersede": {"type": "boolean"},
+                "reheat_scope": {
+                    "type": "string",
+                    "enum": ["global", "chat", "fresh"],
+                },
                 "workspace": _WS,
             },
             [],
@@ -330,6 +339,15 @@ def _tool_result(sup, name: str, args: Dict[str, Any]) -> Dict:
             if "supersede" in args:
                 h.cfg.supersede_enabled = bool(args["supersede"])
                 out.append(f"supersede_enabled={h.cfg.supersede_enabled}")
+            if "reheat_scope" in args:
+                scope = str(args["reheat_scope"]).lower()
+                if scope not in ("global", "chat", "fresh"):
+                    return _text(
+                        "reheat_scope must be 'global', 'chat' or 'fresh'",
+                        is_error=True,
+                    )
+                h.cfg.reheat_scope = scope
+                out.append(f"reheat_scope={h.cfg.reheat_scope}")
             return _text(
                 "; ".join(out)
                 or f"decay_enabled={h.cfg.decay_enabled} "

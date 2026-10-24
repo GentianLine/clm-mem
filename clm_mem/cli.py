@@ -13,7 +13,7 @@ from .llm import OpenAIChat, StubChat, SystemOneClient
 HELP = (
     "commands:  /status   /long   /short   /transient   /recall <text>   "
     "/reinject <block-id>   /keep <pct>   /decay [on|off]   "
-    "/supersede [on|off]   /quit\n"
+    "/supersede [on|off]   /reheat <global|chat>   /quit\n"
     "       agent: /tools [on|off <what>]   /tools <policy>   "
     "/web <query>   /run <command>   /py <code>   /files [path]   "
     "/cat <path>   /rm <path>   /sandbox [info|reset]   "
@@ -330,6 +330,20 @@ def chat_loop(h: MemoryHarness) -> None:
             break
         if text == "/status":
             print(h.status())
+            continue
+        if text.split(maxsplit=1)[0] == "/reheat":
+            parts = text.split()
+            if len(parts) == 2 and parts[1].lower() in ("global", "chat", "fresh"):
+                h.cfg.reheat_scope = parts[1].lower()
+                print(f"  reheat_scope = {h.cfg.reheat_scope}")
+            else:
+                print(
+                    "  usage: /reheat global (hot facts stay hot across chats),"
+                    " /reheat chat (only a chat's own facts lift; others keep"
+                    " fresh) or /reheat fresh (global hot & fresh, access"
+                    " never lifts anywhere -- no reheat here either)"
+                )
+                print(f"  current: {h.cfg.reheat_scope}")
             continue
         if text.split(maxsplit=1)[0] in ("/decay", "/supersede"):
             attr = {"/decay": "decay_enabled", "/supersede": "supersede_enabled"}[
