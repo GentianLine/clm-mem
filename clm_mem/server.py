@@ -651,7 +651,7 @@ class ProxyHandler(BaseHTTPRequestHandler):
             sub = [p for p in parts[3].split("/") if p]
             parts = parts[:3] + sub
         action = parts[4] if len(parts) > 4 else "snapshot"
-        if action == "turns" and len(parts) == 6 and parts[5] == "turns":
+        if action == "turns":
             # GET .../turns?chat=<c> -- replay one chat slot's transcript
             h = sup.get_session(sid)
             if h is None:
