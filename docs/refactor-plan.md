@@ -1,7 +1,8 @@
 # clm-mem refactor: options, ideas, and plan
 
-Status: discussion draft for the owner. Nothing in this file is implemented.
-Branches referenced below exist in the sandbox repo; see `git log` for details.
+Status: decisions-in-progress. Section 12 tracks open questions; resolved
+ones move to section 13 with their consequences written into the body.
+Nothing in this file is implemented yet.
 
 ## 1. What we have today (as-is map)
 
@@ -217,13 +218,29 @@ aliases for one release, then drop.
 
 Three nouns, matching what the studio already implies:
 
-- **workspace** - `ws:<name>`; on-disk sandbox; == harness == legacy "session".
-- **chat** - `chat-001`; transcript slot inside a workspace.
+**DECIDED: a session IS a workspace.** One namespace, not two. A session is
+a *branch* — its own harness (live window + archive) and its own sandbox —
+and nothing about a session's memory is shared unless we later decide to
+make sharing explicit (see section 13). The consequences below are written
+into the design; the sharing question stays open until someone needs it.
+
+- **session / workspace** - `ws:<name>`; one branch: harness + sandbox +
+  chats. The URL keeps `/v1/clm/workspaces` as the collection resource and
+  `/v1/clm/sessions/<id>` addresses the same thing by id (`ws:<name>`) —
+  they are two views of one noun, never two layers.
+- **chat** - `chat-001`; transcript slot inside a session, partitioning who
+  *sees* what without splitting the memory.
 - **turn** - one user message + its assistant reply + event chips; the verb
   that replaces "send a completion with a session header".
 
-Legacy plain sessions (bare ids, no `ws:` prefix) remain supported as
-anonymous workspaces for exactly one release (compat mode).
+Branch semantics worth naming now (cheap to honor later):
+- A branch is created from nothing today; `POST /v1/clm/sessions` can gain
+  `from: <id>` / `seed_archive: <id>` later — fork-on-create, copying or
+  referencing another session's archive. The endpoint shape already allows
+  it; no schema change needed to support that someday.
+- Merging branches (sharing memory) is explicitly deferred — the model
+  keeps one-way *visibility* ideas (recall, re-inject) separate from
+  identity: two sessions never share a live window or sandbox by default.
 
 ### 7.2 Endpoint table
 
@@ -238,12 +255,16 @@ POST   /v1/clm/workspaces                      {name}            create sandbox
 GET    /v1/clm/workspaces                               list + stats
 DELETE /v1/clm/workspaces/<name>                        delete (files included)
 
-POST   /v1/clm/sessions                         {workspace?, model?, options{...}}
-        -> 201 {session_id, workspace, model, budget, created: true|false}
+POST   /v1/clm/sessions                         {session | workspace?, model?, options{...}}
+        -> 201 {session_id, model, budget, created: true|false}
+        `session` names the branch (`ws:<name>`); `workspace` is accepted as
+        a synonym during the naming transition. The collection resource stays
+        `/v1/clm/workspaces` (POST {name} == create + open).
         Idempotent-ish: reopening an existing id returns it with created:false.
         Options (all optional): max_context_tokens, shortterm_keep_pct,
         classify_mode, decay/supersede/reheat_scope, tools_enabled...
         -> maps straight onto HarnessConfig; creation-time only.
+        Reserved for later (fork-on-create): `from` / `seed_archive`.
 
 POST   /v1/clm/sessions/<id>/turns            {content | messages, chat?, model?,
                                                 stream?, temperature?, ...}
@@ -273,6 +294,12 @@ Notes on "similar but different":
 - `/turns` **does not** create sessions. Explicit 409/410 when the session
   is unknown/closed - errors become teachable, and the CLI/studio call
   `POST /v1/clm/sessions` first.
+- **Branch isolation (decided):** every endpoint above operates on exactly
+  one branch. A turn in one session never reheats, decays against, or sees
+  another session's blocks — cross-session contact is limited to explicit,
+  one-way visibility tools (archive search is per-session; re-inject targets
+  one archive). No endpoint takes a list of session ids; sharing, if ever
+  added, arrives as an opt-in relation, not as a broadcast parameter.
 
 ### 7.3 Modes & compatibility
 
@@ -287,6 +314,14 @@ Notes on "similar but different":
 Deprecation telemetry: legacy hits log once per session id (`legacy memory
 entry used; migrate to POST /v1/clm/sessions/<id>/turns`) and appear in
 `/health` as `legacy_sessions: n` so the flip is evidence-based.
+
+**Legacy bare ids die with compat (decided).** Since a session *is* a
+workspace branch, there is no room for an anonymous second kind of session:
+a legacy header request with a bare id maps to `ws:<id>` as an *anonymous
+branch* through the compat adapter (name validated by the same
+`WS_NAME_RE`, created on first use). When compat ends, sessions exist only
+as named workspaces — one namespace, one noun, and `/health` reports
+sessions once instead of twice.
 
 ### 7.4 Streaming, designed once
 
@@ -330,12 +365,14 @@ entry used; migrate to POST /v1/clm/sessions/<id>/turns`) and appear in
 6. **MCP becomes a thin mapping** onto route handlers (it mostly is already)
    and gains `open_session` / `turn` tools mirroring the new verbs, so an MCP
    agent can create sessions explicitly.
-7. **Persist session templates.** Workspaces already persist files; adding
-   `workspace.json` with last-used options means a reopened workspace keeps
-   its budget/keep-pct instead of defaults - cheap, high quality-of-life.
-8. **Deprecate the implicit bare-id session** after compat ends: every
-   harness lives in a named workspace. Removes the weird "session vs
-   ws:session" duality from health output and tests.
+7. **Persist session templates.** Branches already persist files; adding
+   `workspace.json` (or `session.json`) with last-used options means a
+   reopened branch keeps its budget/keep-pct instead of defaults - cheap,
+   high quality-of-life, and the natural home for whatever sharing/forking
+   metadata we invent later (`from: <parent>` lineage).
+8. **One namespace.** With sessions==workspaces==branches decided, item 8 of
+   the earlier draft ("deprecate bare-id sessions") moved into section 7.3
+   as a decided behavior instead of an open idea.
 9. **`clm-mem chat --connect` rides RemoteHarness with explicit open** -
    one-time `POST /v1/clm/sessions` at connect, then `/turns`. CLI UX
    unchanged; internals unified.
@@ -380,7 +417,13 @@ the rest.
 ### M3 - Session API (`feat/session-api`)
 - Implement `POST /v1/clm/sessions`, `/turns` (non-stream + SSE replay via
   shared helper), transcript GET; `Session` object with metadata.
-- Compat adapter: header path calls the same handlers.
+- **Branch model per decision D1:** a `Session` == workspace branch == one
+  harness instance, keyed by `ws:<name>`. The object records lineage-ish
+  metadata (created_at, last_used, chat slots, config template) and keeps
+  room for future `from`/parent fields so fork-on-create and optional
+  sharing never require re-shaping it later.
+- Compat adapter: header path calls the same handlers; bare ids become
+  anonymous branches (`ws:<id>`, validated by `WS_NAME_RE`).
 - `clients/remote.py`: add `open()`, `turn()`; keep `step()` as sugar over
   them (RemoteHarness becomes the reference SDK).
 - MCP: add `clm_open_session`, `clm_turn` tools.
@@ -424,18 +467,37 @@ the rest.
 
 ## 12. Open questions for the owner
 
-1. **Session == workspace?** Today a session *is* a workspace harness
-   (`ws:<name>`). The proposal keeps that. Alternative: sessions become
-   short-lived objects *inside* a workspace (many concurrent chats with
-   independent live windows). This is a real semantic fork - the spike's
-   chat isolation hints at wanting it. Which way?
-2. **Streaming priority.** Is S2 (true streaming) required for v0.4, or is
+1. **Streaming priority.** Is S2 (true streaming) required for v0.4, or is
    the replayed SSE acceptable while clients migrate? Affects M6 ordering.
-3. **Compat window length** - one release then flip to `explicit` default,
+2. **Compat window length** - one release then flip to `explicit` default,
    or keep `both` longer? Unsloth Studio integration is the main consumer
    to check before flipping.
-4. Are bare-id legacy sessions (no `ws:` prefix) worth keeping past compat?
-5. Does the CLI chat's local mode (no server, direct harness) need any of
+3. Does the CLI chat's local mode (no server, direct harness) need any of
    this, or does it stay pure-engine and untouched? (Assumed: untouched.)
-6. Naming bikeshed: `/turns` vs `/messages` vs `/say`; `clm-mem api` vs
+4. Naming bikeshed: `/turns` vs `/messages` vs `/say`; `clm-mem api` vs
    `clm-mem serve --library`. Not blocking; pick when M3 starts.
+5. **Optional sharing (deferred, by your call).** Since a session is a
+   branch, the eventual fork/merge questions are: do branches ever share a
+   base (archive copy-on-reference instead of per-branch files)? can a turn
+   in branch A reheat blocks in branch B when someone opts in? and what
+   would "merging" two branches mean for importance/decay state? No answer
+   needed now — but M3's `Session` object should keep the door open (record
+   lineage fields, never assume one-harness-per-name is permanent).
+
+## 13. Decisions (resolved; consequences written into the body)
+
+**D1 — Session == workspace == branch.** Each session gets its own harness,
+archive, and sandbox; nothing shared unless we later decide to make sharing
+explicit. Consequences already applied:
+- One namespace: bare-id legacy sessions become anonymous branches and die
+  with the compat window (section 7.3).
+- `POST /v1/clm/sessions` is branch creation; open-time config is cheap and
+  correct there because a session is long-lived, not request-scoped.
+- Endpoint surface keeps `/v1/clm/workspaces` as the collection and
+  `/v1/clm/sessions/<id>` as the branch address (synonym-tolerant during
+  transition); no endpoint takes multiple session ids — isolation is
+  structural, sharing would be opt-in metadata (section 7.2 note,
+  section 8 idea 5).
+- The spike's chat-isolation work fits this model exactly: chats partition
+  *visibility inside* a branch; sessions/branches isolate memory *between*
+  branches. Two clean levels instead of the old ambiguous split.
