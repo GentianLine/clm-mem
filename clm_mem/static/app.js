@@ -279,6 +279,7 @@ async function openChat(name, key) {
   clearChatView();
   try {
     // register the slot server-side so an empty chat still lists itself
+    // (chat-open creates the harness on demand, so no separate open needed)
     await req("POST", `/v1/clm/sessions/${encodeURIComponent(sid())}/chat-open`,
       { chat: key });
     const snap = await req("GET", `/v1/clm/sessions/${encodeURIComponent(sid())}/snapshot` + chatQs());
@@ -317,6 +318,18 @@ async function selectWorkspace(name, refreshPanels = true) {
     if (last !== "chat-001") await openChat(state.ws, last);
   }
 }
+/* Open the memory branch behind this workspace. Memory is explicit now:
+   POST /v1/clm/sessions creates-or-reopens (idempotent), turns require an
+   open branch, so every code path that talks to a project opens it first. */
+let openedBranch = null;
+async function openSession() {
+  if (!state.ws) throw new Error("no workspace selected");
+  const s = sid();
+  if (openedBranch === s) return;
+  await req("POST", "/v1/clm/sessions", { session: s });
+  openedBranch = s;
+}
+
 async function selectWorkspaceInternal(name, refreshPanels = true) {
   if (state.ws === name && !refreshPanels) return;  // already there: don't clobber the caller's chat
   state.ws = name;
@@ -325,6 +338,8 @@ async function selectWorkspaceInternal(name, refreshPanels = true) {
   const known = state.chats.filter((c) => CHAT_RE.test(c));
   state.chat = known.length ? known.sort()[known.length - 1] : "chat-001";
   clearChatView();
+  // the snapshot/turns contract needs an open branch: open before reading
+  try { await openSession(); } catch (e) { /* serve may be mid-restart */ }
   try {
     const snap = await req("GET", `/v1/clm/sessions/${encodeURIComponent(sid())}/snapshot` + chatQs());
     restoreTranscript(snap);
@@ -443,9 +458,12 @@ async function send() {
     pollApprovals();
   }, 800);
   try {
-    const resp = await req("POST", "/v1/chat/completions", {
-      model: (state.model || null), messages: [{ role: "user", content: text }],
-    }, { "X-Cllm-Mem-Chat": chatId(), "X-Cllm-Mem-Session": sid() });
+    // memory is explicit: turn on the open branch (openSession keeps it
+    // cheap -- one POST /v1/clm/sessions per workspace visit) 
+    await openSession();
+    const resp = await req("POST", `/v1/clm/sessions/${encodeURIComponent(sid())}/turns`, {
+      model: (state.model || null), content: text, chat: chatId(),
+    });
     clearInterval(timer);
     await pollActivity(actBox);          // catch the final state of each card
     if (!actBox.childNodes.length) actBox.remove();   // nothing happened
@@ -917,6 +935,8 @@ document.addEventListener("DOMContentLoaded", () => {
       }
       await req("POST", `/v1/clm/sessions/${encodeURIComponent(sid())}/reset`,
         { chats: state.chats.concat([next]) });
+      openedBranch = null;   // reset dropped the branch: re-open before turns
+      try { await openSession(); } catch (e) { /* first turn may create it */ }
       state.events = [];
       clearChatView();
       // a brand-new chat never inherits the previous one's draft

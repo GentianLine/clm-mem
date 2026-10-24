@@ -42,11 +42,36 @@ _WS = {
 
 TOOLS: List[Dict] = [
     {
+        "name": "clm_open_session",
+        "description": (
+            "Open (or reopen) a memory branch for a workspace. A branch is "
+            "a session == workspace == its own harness + sandbox; this "
+            "creates it explicitly before the first clm_chat turn, and "
+            "accepts creation-time options like max_context_tokens."
+        ),
+        "inputSchema": _obj(
+            {
+                "workspace": _WS,
+                "model": _STR,
+                "options": {
+                    "type": "object",
+                    "description": (
+                        "open-time harness knobs (creation-time only): "
+                        "max_context_tokens, shortterm_keep_pct, "
+                        "classify_mode, decay/supersede toggles, ..."
+                    ),
+                },
+            },
+            [],
+        ),
+    },
+    {
         "name": "clm_chat",
         "description": (
             "Send a message to the clm-mem memory-managed chat for a "
             "workspace. The harness classifies context as longterm / "
-            "shortterm / transient and enforces the token budget."
+            "shortterm / transient and enforces the token budget. Opens "
+            "the branch implicitly if it was never opened."
         ),
         "inputSchema": _obj({"message": _STR, "workspace": _WS}, ["message"]),
     },
@@ -303,9 +328,27 @@ def _tool_result(sup, name: str, args: Dict[str, Any]) -> Dict:
             "clm_web_search",
         ):
             return _agent_result(sup, sid, name, args)
+        if name == "clm_open_session":
+            opts = args.get("options") or {}
+            try:
+                h = sup.harness_for(sid, str(args.get("model", "")), overrides=opts)
+            except ValueError as exc:
+                return _text(f"cannot open session: {exc}", is_error=True)
+            created = getattr(h, "_branch_created", False)
+            return _text(
+                json.dumps(
+                    {
+                        "session_id": sid,
+                        "created": bool(created),
+                        "budget": h.cfg.max_context_tokens,
+                        "status": h.status(),
+                    }
+                )
+            )
         if name == "clm_chat":
             h = sup.harness_for(sid)
-            reply = h.step(str(args.get("message", "")))
+            out = h.step(str(args.get("message", "")), since_event_seq=None)
+            reply = out["reply"] if isinstance(out, dict) else out
             return _text(f"{reply}\n\n[context: {h.status()}]")
         if name == "clm_status":
             h = sup.harness_for(sid)

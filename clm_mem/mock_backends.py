@@ -50,7 +50,7 @@ class _Silent(BaseHTTPRequestHandler):
         self.send_header("Access-Control-Allow-Origin", "*")
         self.send_header(
             "Access-Control-Allow-Headers",
-            "Content-Type, Authorization, X-Cllm-Mem-Session",
+            "Content-Type, Authorization",
         )
         self.send_header("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
 

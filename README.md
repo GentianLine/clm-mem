@@ -98,8 +98,9 @@ ollama pull qwen3:8b
 `clm-mem serve` turns the harness into a **single llama.cpp-shaped endpoint**:
 to any OpenAI/llama.cpp client (Unsloth Studio, openai-python, text-gen-webui,
 an LLM agent runtime...) it looks like one ordinary server at one host:port.
-Behind it, `serve` brings up 2-3 background processes and wires the memory
-harness into every request that carries a session header:
+Behind it, `serve` brings up 2-3 background processes; memory lives behind
+explicit session verbs (`POST /v1/clm/sessions`, `.../turns`) rather than
+chat-completions headers -- see *Client contract* below:
 
 ```
 client ──http──> clm-mem proxy :8080          <- what clients talk to
@@ -166,28 +167,55 @@ clm-mem budget to exactly that value, so the two windows never drift apart.
  "processes": {"backend-mock": "...", "systemone-mock": "..."}}
 ```
 
-**Client contract.** Point any OpenAI client at `base_url` with `api_key="EMPTY"`.
-Requests *without* a session header are pure passthrough (behaves exactly like
-plain llama.cpp). Requests *with* the header go through the memory harness:
+**Client contract (memory is explicit).** A memory session is a **branch**:
+it owns its harness (live window + archive) and sandbox, addressed as
+`ws:<name>`. You *open* a branch, then you *turn* on it -- memory is never a
+header side effect of `/v1/chat/completions`, which stays pure passthrough
+(exactly plain llama.cpp for any OpenAI client pointed at `base_url` with
+`api_key="EMPTY"`). The retired `X-Cllm-Mem-Session` / `X-Cllm-Mem-Chat`
+headers are rejected with a **410** that points at the verbs to use:
 
-```python
-import openai
-client = openai.OpenAI(base_url="http://localhost:8080/v1", api_key="EMPTY",
-                       default_headers={"X-Cllm-Mem-Session": "unsloth-user"})
-client.chat.completions.create(model="mock-model",
-    messages=[{"role": "user",
-               "content": "Remember: the deploy port is 8080."}])   # memory applies
+```bash
+curl -X POST http://localhost:8080/v1/clm/sessions \
+     -H 'Content-Type: application/json' \
+     -d '{"session": "ws:unsloth-user"}'          # -> 201 {created: true, budget...}
+
+curl -X POST http://localhost:8080/v1/clm/sessions/ws%3Aunsloth-user/turns \
+     -H 'Content-Type: application/json' \
+     -d '{"content": "Remember: the deploy port is 8080."}'   # -> memory-managed reply
 ```
 
-Supported surface (llama.cpp + OpenAI union): `/v1/chat/completions` (incl.
-SSE streaming), `/v1/models`, `/v1/decisions` (accepted incoming as the
-provider alias spellings `/v1/systemone` and `/v1/classifier` too, same
-contract; the proxy relays to `--systemone-url` verbatim -- that flag is the
-complete endpoint URL and nothing is appended to it), native `/completion`,
-`/props`, `/metrics`, `/version`, `/health`, CORS preflight, plus clm-mem
-introspection routes `/v1/clm/sessions`, `/v1/clm/sessions/<id>/status`,
-`.../reset`, and `DELETE /v1/clm/sessions/<id>` — and the full studio API
-below.
+```python
+from clm_mem import RemoteHarness
+h = RemoteHarness("http://localhost:8080/v1", session="ws:unsloth-user")
+h.open()                              # POST /v1/clm/sessions (idempotent)
+h.turn("Remember: the deploy port is 8080.")   # POST .../turns
+```
+
+The turns endpoint mirrors chat-completions where useful (`content` or a
+full `messages` array, `model`, `temperature`, `stream`) and differs where
+correct: it **never creates sessions** (409 on an unknown branch), it names
+its chat slot in the reply, and its answer carries harness truth -- counts,
+budget, archive size and this turn's event chips under `clm_mem`. With
+`"stream": true` it answers SSE: role delta, content deltas, one
+`event: clm-mem-event` chunk per memory chip, then `[DONE]`.
+Open-time options (`max_context_tokens`, `shortterm_keep_pct`,
+classify/decay/supersede/tools knobs...) ride on the open call and build the
+branch's config; generation knobs stay per-request.
+
+Supported surface (llama.cpp + OpenAI union): `/v1/chat/completions` pure
+passthrough (incl. SSE streaming), `/v1/models`, `/v1/decisions` (accepted
+incoming as the provider alias spellings `/v1/systemone` and
+`/v1/classifier` too, same contract; the proxy relays to `--systemone-url`
+verbatim -- that flag is the complete endpoint URL and nothing is appended
+to it), native `/completion`, `/props`, `/metrics`, `/version`, `/health`,
+CORS preflight. Memory surface: `POST /v1/clm/sessions` (open), `POST
+/v1/clm/sessions/<id>/turns` (+ `GET` transcript replay), introspection
+routes `/v1/clm/sessions`, `/v1/clm/sessions/<id>/status`, `.../reset`, and
+`DELETE /v1/clm/sessions/<id>` — plus the full studio API below.
+
+Session ids are branch ids: `ws:<name>`. Percent-encode the colon in URL
+paths (`ws%3Aname`) or leave it bare -- both spellings route identically.
 
 ## Web studio + workspaces + MCP
 
@@ -220,6 +248,12 @@ Studio API (same-origin, JSON):
 GET    /v1/clm/workspaces                    list projects + live stats
 POST   /v1/clm/workspaces        {name}     create a sandbox
 DELETE /v1/clm/workspaces/<name>            delete it (files included)
+POST   /v1/clm/sessions       {session,model?,options?}
+                                             open a branch (410-free zone:
+                                             this is where memory begins)
+POST   /v1/clm/sessions/<id>/turns {content|messages, chat?, stream?}
+                                             the conversation verb (+SSE)
+GET    /v1/clm/sessions/<id>/turns?chat=…   transcript replay for one chat
 GET    /v1/clm/sessions                    list live session ids
 GET    /v1/clm/sessions/<id>/snapshot[?full=1]   full context view
 GET    /v1/clm/sessions/<id>/archive?q=…   search the eviction archive
@@ -241,7 +275,8 @@ DELETE /v1/clm/sessions/<id>/sandbox              reset (wipe) the sandbox
 ```
 
 **MCP toolbox.** `serve` is also an MCP server (streamable HTTP JSON-RPC at
-`/mcp`): `initialize`, `tools/list`, `tools/call` with tools `clm_chat`,
+`/mcp`): `initialize`, `tools/list`, `tools/call` with tools
+`clm_open_session`, `clm_chat`,
 `clm_status`, `clm_blocks`, `clm_recall`, `clm_reinject`,
 `clm_set_keep_pct`, `clm_workspaces`, plus the agent surface — `clm_tools`,
 `clm_tool_on`, `clm_tool_call`, `clm_sandbox_exec`, `clm_web_search`. Point

@@ -724,8 +724,9 @@ def _cfg(a: argparse.Namespace, fallback_model: Optional[str] = None) -> Harness
 
 def cmd_chat(a: argparse.Namespace) -> None:
     if getattr(a, "connect", ""):
-        # Attach this prompt to a running `clm-mem serve` (same library the
-        # web studio uses; sessions are shared via X-Cllm-Mem-Session).
+        # Attach this prompt to a running `clm-mem serve`: RemoteHarness
+        # opens the branch once (POST /v1/clm/sessions) and turns from
+        # there -- exactly what the web studio's app.js does.
         from .remote import connect as open_remote
 
         h = open_remote(
@@ -1096,8 +1097,8 @@ def cmd_serve(a: argparse.Namespace) -> None:
                 "search, sandboxed commands and file work"
             )
         print(
-            "  memory sessions  : send header "
-            f"X-Cllm-Mem-Session: <id> on chat requests"
+            "  memory sessions  : POST /v1/clm/sessions to open a branch, "
+            "then POST /v1/clm/sessions/<id>/turns to converse"
         )
     print(_json.dumps(ready), flush=True)
     try:
