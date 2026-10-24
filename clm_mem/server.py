@@ -323,7 +323,6 @@ class ProxyHandler(BaseHTTPRequestHandler):
     def _harness_for(self, sid: str, model: str, chat: Optional[str] = None):
         return self.supervisor.harness_for(sid, model, chat=chat)
 
-
     def _sse_reply(self, sid: str, model: str, reply: str):
         self._start_sse()
         created = int(time.time())
@@ -670,14 +669,20 @@ class ProxyHandler(BaseHTTPRequestHandler):
                     continue
                 res = h.remember(s, chat=chat, pinned=True)
                 ok = res.get("ok") if isinstance(res, dict) else True
-                bid = res.get("block_id", res.get("id")) if isinstance(res, dict) else None
+                bid = (
+                    res.get("block_id", res.get("id"))
+                    if isinstance(res, dict)
+                    else None
+                )
                 out.append({"ok": bool(ok), "block_id": bid})
-            return self.send_json({
-                "session_id": sid,
-                "chat": chat,
-                "ok": True,
-                "seeded": out,
-            })
+            return self.send_json(
+                {
+                    "session_id": sid,
+                    "chat": chat,
+                    "ok": True,
+                    "seeded": out,
+                }
+            )
         # the agent surface creates its session on demand: toggling tools or
         # poking the sandbox before a first message is legitimate UX.
         if action in (

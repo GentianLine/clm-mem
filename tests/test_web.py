@@ -488,7 +488,11 @@ def test_chat_open_seed_gives_a_chat_born_with_memories(sup):
         "/v1/clm/sessions/ws%3Aseeded/snapshot?chats=chat-002",
         "GET",
     )
-    seed_blocks = [b for b in snap["blocks"] if b.get("content", "").startswith(("User prefers dark roast", "Pet named"))]
+    seed_blocks = [
+        b
+        for b in snap["blocks"]
+        if b.get("content", "").startswith(("User prefers dark roast", "Pet named"))
+    ]
     assert len(seed_blocks) == 2, snap
     assert all(b["tag"] == "longterm" and b["chat"] == "chat-002" for b in seed_blocks)
     assert all(b.get("pinned") for b in seed_blocks)
@@ -499,9 +503,7 @@ def test_chat_open_seed_gives_a_chat_born_with_memories(sup):
         "/v1/clm/sessions/ws%3Aseeded/snapshot?chats=chat-001",
         "GET",
     )
-    assert not [
-        b for b in snap1["blocks"] if "dark roast" in (b.get("content") or "")
-    ]
+    assert not [b for b in snap1["blocks"] if "dark roast" in (b.get("content") or "")]
 
     # empty seed strings are skipped, no crash
     st, d = http_call(
