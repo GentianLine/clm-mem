@@ -832,6 +832,8 @@ function primeTuning(snap) {
   $("keepOut").textContent = Math.round((snap.shortterm_keep_pct || 0.5) * 100) + "%";
   $("decayOn").checked = !!snap.decay_enabled;
   $("supOn").checked = !!snap.supersede_enabled;
+  const sel = $("reheatScope");
+  if (sel) sel.value = snap.reheat_scope || "global";
   const inp = $("budgetInput");
   inp.value = snap.budget;
   // the llama.cpp window is fixed when the backend loads; the harness budget
@@ -993,6 +995,16 @@ document.addEventListener("DOMContentLoaded", () => {
   $("supOn").addEventListener("change", async (e) => {
     await applySetting({ supersede_enabled: e.target.checked });
     toast(`supersession ${e.target.checked ? "on" : "off"}`);
+  });
+  const SCOPE_TOAST = {
+    chat: "reheating: chat-scoped (other chats only keep facts fresh)",
+    fresh:
+      "reheating: fresh-only (global hot & fresh, access never lifts)",
+    global: "reheating: global (hot facts stay hot everywhere)",
+  };
+  $("reheatScope").addEventListener("change", async (e) => {
+    await applySetting({ reheat_scope: e.target.value });
+    toast(SCOPE_TOAST[e.target.value] || SCOPE_TOAST.global);
   });
 
   // agent toggles in the composer (per-project, applied live) ---------------

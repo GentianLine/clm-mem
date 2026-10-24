@@ -778,6 +778,20 @@ class ProxyHandler(BaseHTTPRequestHandler):
                 )
                 setattr(h.cfg, k, val)
                 changed[k] = val
+            # reheat access model: 'global' (hot everywhere), 'chat' (only
+            # the fact's own chat lifts it; others just keep it fresh) or
+            # 'fresh' (global hot & fresh, but access never lifts anywhere --
+            # no reheat for the current session either)
+            v = body.get("reheat_scope")
+            if v is not None:
+                scope = str(v).lower()
+                if scope not in ("global", "chat", "fresh"):
+                    return self.send_error_json(
+                        400,
+                        "reheat_scope must be 'global', 'chat' or 'fresh'",
+                    )
+                h.cfg.reheat_scope = scope
+                changed["reheat_scope"] = scope
             return self.send_json(
                 {"session_id": sid, "changed": changed, "status": h.status()}
             )

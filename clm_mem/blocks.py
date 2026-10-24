@@ -26,4 +26,7 @@ class Block:
     chat_slot: int = -1  # transcript slot that produced this block (-1 legacy)
     pinned: bool = False  # e.g. system prompt -- never evicted
     importance: float = 0.0  # base value, assigned from tag on add()
-    last_access: int = -1  # turn of last reheat; creation turn if unset
+    last_access: int = -1  # turn this fact was touched *in its own chat*
+    # (freshness); creation turn if unset. Cross-chat touches land in
+    # ``last_seen`` instead -- see ``harness.reheat``.
+    last_seen: int = -1  # turn of last cross-chat touch; creation turn if unset

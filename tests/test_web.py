@@ -349,6 +349,26 @@ def test_settings_forget_toggles(sup):
     st, snap = http_call(sup, "/v1/clm/sessions/ws%3Aproj/snapshot")
     assert snap["decay_enabled"] is False and snap["supersede_enabled"] is True
 
+    # reheat access model accepts global | chat | fresh (global hot & fresh,
+    # no reheat for the current session); anything else is a 400
+    st, d = http_call(
+        sup,
+        "/v1/clm/sessions/ws%3Aproj/settings",
+        "POST",
+        {"reheat_scope": "fresh"},
+    )
+    assert st == 200 and d["changed"]["reheat_scope"] == "fresh"
+    st, snap = http_call(sup, "/v1/clm/sessions/ws%3Aproj/snapshot")
+    assert snap["reheat_scope"] == "fresh"
+
+    st, bad = http_call(
+        sup,
+        "/v1/clm/sessions/ws%3Aproj/settings",
+        "POST",
+        {"reheat_scope": "whirlwind"},
+    )
+    assert st == 400
+
 
 def test_mcp_set_forget_tool(sup):
     st, lst = mcp_call(sup, {"jsonrpc": "2.0", "id": 2, "method": "tools/list"})
