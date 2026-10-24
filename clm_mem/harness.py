@@ -10,6 +10,17 @@ import time
 from typing import Dict, List, Optional
 from .blocks import LONG, SHORT, TRANSIENT, VALID_TAGS, Block
 
+#: chat ids look like ``chat-001``
+CHAT_RE_P = re.compile(r"chat-(\d{3,})$")
+
+
+def slot_to_chat(slot: int) -> str:
+    """Chat id for a zero-based chat slot; legacy (-1) renders inside chat-001."""
+    if slot < 0:
+        return "chat-001"
+    return f"chat-{slot + 1:03d}"
+
+
 #: Base value assigned at classification time (forgetting-curve seed).
 BASE_IMPORTANCE = {LONG: 1.0, SHORT: 0.6, TRANSIENT: 0.3}
 
@@ -82,11 +93,17 @@ class MemoryHarness:
         self.counter = TokenCounter(self.cfg.tokenizer_name)
         self.blocks: List[Block] = []
         self.turn = 0
+        #: chat slot owning ``self.turn`` (see server.chat_slot): chats are
+        #: transcript slots inside one harness session; blocks, events and
+        #: tool activity carry the slot of the chat that produced them.
+        self.slot = -1
         # Events are structured so the web UI can render them as hints/timeline
         # entries instead of printing raw context at the user.
         self.events: List[Dict] = []
         self._next_id = 0
         self._seq = 0
+        #: chat ids opened by the UI but not yet written to (sidebar slots)
+        self.known_chats: set = set()
         if self.cfg.memory_preamble:
             self.add("system", MEMORY_PREAMBLE, tag=LONG, pinned=True)
 
@@ -110,14 +127,22 @@ class MemoryHarness:
         evict-phase1/2/3, backstop-*, classify, warn.
         """
         self._seq += 1
-        return {"seq": self._seq, "t": time.time(), "kind": kind, "text": text}
+        out = {"seq": self._seq, "t": time.time(), "kind": kind, "text": text}
+        # chat attribution: which transcript slot produced this event
+        out["chat"] = slot_to_chat(self.slot)
+        return out
 
     def _event(self, kind: str, text: str) -> None:
         self.events.append(self._mk(kind, text))
 
     # -- basic ops ----------------------------------------------------------
     def add(
-        self, role: str, content: str, tag: str = TRANSIENT, pinned: bool = False
+        self,
+        role: str,
+        content: str,
+        tag: str = TRANSIENT,
+        pinned: bool = False,
+        slot: Optional[int] = None,
     ) -> Block:
         b = Block(
             id=self._next_id,
@@ -125,6 +150,7 @@ class MemoryHarness:
             content=content.strip(),
             tag=tag,
             turn=self.turn,
+            chat_slot=self.slot if slot is None else slot,
             pinned=pinned,
             importance=BASE_IMPORTANCE.get(tag, 0.3),
             last_access=self.turn,
@@ -539,6 +565,7 @@ class MemoryHarness:
                         {
                             "id": b.id,
                             "turn": b.turn,
+                            "chat_slot": getattr(b, "chat_slot", -1),
                             "role": b.role,
                             "tag": b.tag,
                             "content": b.content,
@@ -577,6 +604,7 @@ class MemoryHarness:
                         rec["role"],
                         f"[recalled #{block_id}] {rec['content']}",
                         tag=SHORT,
+                        slot=rec.get("chat_slot", -1),
                     )
                     return True
         return False
@@ -658,7 +686,7 @@ class MemoryHarness:
                 break
             batch: List[tuple] = []
             for c in calls:
-                res = self.tools.execute(c)
+                res = self.tools.execute(c, chat=self._chat_name())
                 self._tool_event(res, c)
                 batch.append((c, res))
                 used += 1
@@ -677,14 +705,20 @@ class MemoryHarness:
         return raw
 
     # -- top-level: one conversational turn ----------------------------------------
-    def step(self, user_text: str) -> str:
+    def step(self, user_text: str, chat_slot: Optional[int] = None) -> str:
         """Send a user message; returns the (tag-stripped) assistant reply.
 
         Side effects: eviction may run, files are mirrored, ``self.events`` grows.
         When tools are active the model may call web/exec/fs tools first; their
         results enter the window as short-term blocks and obey the same budget.
+
+        ``chat_slot`` is the zero-based index of the transcript slot that
+        produced this turn (:func:`slot_to_chat` turns it back into a
+        ``chat-001`` id); ``None`` keeps legacy behaviour where every turn
+        belongs to the project's single implicit chat.
         """
         self.turn += 1
+        self.slot = chat_slot if chat_slot is not None else -1
 
         # Pre-classify user request using SystemOne before sending to LLM
         tag = TRANSIENT
@@ -759,6 +793,7 @@ class MemoryHarness:
         events_tail: int = 24,
         include_full: bool = False,
         activity_tail: int = 14,
+        chats: Optional[List[str]] = None,
     ) -> Dict:
         """JSON-friendly view of the live window -- what the web UI renders.
 
@@ -768,11 +803,16 @@ class MemoryHarness:
         """
         blocks = []
         for b in self.blocks:
+            slot = getattr(b, "chat_slot", -1)
             entry = {
                 "id": b.id,
                 "role": b.role,
                 "tag": b.tag,
                 "turn": b.turn,
+                # chat attribution; legacy blocks (slot -1) render inside
+                # chat-001, the project's implicit first conversation
+                "chat": slot_to_chat(slot),
+                "chat_slot": slot,
                 "pinned": b.pinned,
                 "tokens": self.counter.count_block(b),
                 "chars": len(b.content),
@@ -786,6 +826,9 @@ class MemoryHarness:
                 entry["content"] = b.content[:preview_chars]
                 entry["truncated"] = True
             blocks.append(entry)
+        if chats:
+            want = {c for c in chats if CHAT_RE_P.match(c or "")}
+            blocks = [e for e in blocks if e["chat"] in want]
         return {
             "turn": self.turn,
             "tokens": self.tokens(),
@@ -801,13 +844,53 @@ class MemoryHarness:
             "events": self.events[-events_tail:],
             # agent surface: what tools are on, what they did, what is pending
             "tools": self.tools.state(),
-            "activity": self.tools.activity(limit=activity_tail),
+            "activity": self.tools.activity(
+                limit=activity_tail,
+                chats=[c for c in (chats or []) if CHAT_RE_P.match(c or "")],
+            ),
             "approvals": (
-                self.tools.approvals()
+                self.tools.approvals(
+                    chats=[c for c in (chats or []) if CHAT_RE_P.match(c or "")]
+                )
                 if self.tools.broker.mode != "auto"
                 else {"pending": [], "history": [], "mode": "auto"}
             ),
+            # every chat slot this session has ever seen (for the sidebar list)
+            "chats": self.chat_slots(),
         }
+
+    def chat_slots(self) -> List[str]:
+        """Sorted chat ids for every slot this session has ever seen.
+
+        Slots live in blocks (live window), the archive tail and the tool
+        activity log; a chat opened but never messaged still lists itself via
+        :meth:`remember_chat_slot` so the sidebar keeps the slot visible.
+        """
+        out = set()
+        for b in self.blocks:
+            s = getattr(b, "chat_slot", -1)
+            if s >= 0:
+                out.add(slot_to_chat(s))
+        for e in self.events[-400:]:
+            c = e.get("chat")
+            if c:
+                out.add(c)
+        for a in self.tools.activity(limit=200, full=False):
+            c = a.get("chat")
+            if c:
+                out.add(c)
+        for c in getattr(self, "known_chats", set()):
+            out.add(c)
+        return sorted(out)
+
+    def _chat_name(self) -> str:
+        """Chat id for the slot currently producing events (see `_mk`)."""
+        return slot_to_chat(self.slot)
+
+    def remember_chat_slot(self, chat: str) -> None:
+        """Register a chat slot the UI opened (before its first message)."""
+        if CHAT_RE_P.match(chat or ""):
+            self.known_chats.add(chat)
 
     def counts(self) -> Dict[str, int]:
         out = {LONG: 0, SHORT: 0, TRANSIENT: 0}

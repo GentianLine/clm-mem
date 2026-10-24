@@ -7,7 +7,7 @@
 <link rel="icon" type="image/svg+xml" href="/favicon.svg">
 <link rel="stylesheet" href="/style.css">
 </head>
-<body>
+<body class="view-chat">
 <div id="splash">
   <img src="/dyson.svg" width="72" height="72" alt="">
   <span class="splash-name">clm-mem <em>studio</em></span>
@@ -16,6 +16,11 @@
   <div class="brand">
     <svg class="logo" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9" fill="#7c3aed"/><circle cx="12" cy="12" r="9" fill="none" stroke="#9aa3ad" stroke-width="3" stroke-dasharray="4.398 9.739" stroke-dashoffset="-2.199"/><circle cx="12" cy="12" r="4.1" fill="#c084fc"/></svg>
     <span class="name">clm-mem <em>studio</em></span>
+  </div>
+  <div class="view-btns" id="viewBtns" role="group" aria-label="switch panel" title="switch panel">
+    <button data-view="side" aria-pressed="false" title="projects">☰</button>
+    <button data-view="chat" class="on" aria-pressed="true" title="chat">✦</button>
+    <button data-view="insp" aria-pressed="false" title="inspector">▤</button>
   </div>
   <div class="status-pills" id="pills"></div>
   <div class="spacer"></div>
@@ -71,41 +76,43 @@
   </section>
 
   <aside id="inspector">
-    <nav id="tabs">
-      <button data-tab="context" class="on">Context</button>
-      <button data-tab="archive">Archive</button>
-      <button data-tab="events">Events</button>
-      <button data-tab="sandbox">Sandbox</button>
-      <button data-tab="tuning">Tuning</button>
+    <nav id="tabs" role="tablist">
+      <button data-tab="context" class="on" role="tab" aria-selected="true">Context</button>
+      <button data-tab="archive" role="tab" aria-selected="false">Archive</button>
+      <button data-tab="events" role="tab" aria-selected="false">Events</button>
+      <button data-tab="sandbox" role="tab" aria-selected="false">Sandbox</button>
+      <button data-tab="tuning" role="tab" aria-selected="false">Tuning</button>
     </nav>
 
-    <div id="tab-context" class="tab">
-      <div class="budget">
-        <div class="bar"><i id="budgetFill"></i></div>
-        <div class="budget-text"><span id="budgetNums">0 / 0</span>
-          <span class="counts">
-            <b class="c-long" id="cLong">0</b><b class="c-short" id="cShort">0</b><b class="c-trans" id="cTrans">0</b>
-          </span></div>
+    <div id="tab-context" class="tab" role="tabpanel">
+      <div class="tab-head">
+        <div class="budget">
+          <div class="bar"><i id="budgetFill"></i></div>
+          <div class="budget-text"><span id="budgetNums">0 / 0</span>
+            <span class="counts">
+              <b class="c-long" id="cLong">0</b><b class="c-short" id="cShort">0</b><b class="c-trans" id="cTrans">0</b>
+            </span></div>
+        </div>
+        <div class="filter" id="tagFilter">
+          <button data-tag="" class="on">all</button>
+          <button data-tag="longterm">long</button>
+          <button data-tag="shortterm">short</button>
+          <button data-tag="transient">transient</button>
+        </div>
       </div>
-      <div class="filter" id="tagFilter">
-        <button data-tag="" class="on">all</button>
-        <button data-tag="longterm">long</button>
-        <button data-tag="shortterm">short</button>
-        <button data-tag="transient">transient</button>
-      </div>
-      <ul id="blockList"></ul>
+      <ul id="blockList" class="tab-list"></ul>
     </div>
 
-    <div id="tab-archive" class="tab" hidden>
-      <form id="searchForm"><input id="searchInput" placeholder="search evicted memory…" autocomplete="off"></form>
-      <ul id="archiveList"><li class="empty">Type to search the archive.</li></ul>
+    <div id="tab-archive" class="tab" role="tabpanel" hidden>
+      <form id="searchForm" class="tab-head"><input id="searchInput" placeholder="search evicted memory…" autocomplete="off"></form>
+      <ul id="archiveList" class="tab-list"><li class="empty">Type to search the archive.</li></ul>
     </div>
 
-    <div id="tab-events" class="tab" hidden>
-      <ul id="eventList"><li class="empty">No context events yet.</li></ul>
+    <div id="tab-events" class="tab" role="tabpanel" hidden>
+      <ul id="eventList" class="tab-list"><li class="empty">No context events yet.</li></ul>
     </div>
 
-    <div id="tab-tuning" class="tab" hidden>
+    <div id="tab-tuning" class="tab" role="tabpanel" hidden>
       <label class="tune">shortterm keep per FIFO round
         <input type="range" id="keepSlider" min="0" max="95" step="5" value="50">
         <output id="keepOut">50%</output></label>
@@ -123,7 +130,7 @@
       <p class="note">Changes apply live to the selected project's session.</p>
     </div>
 
-    <div id="tab-sandbox" class="tab" hidden>
+    <div id="tab-sandbox" class="tab" role="tabpanel" hidden>
       <div class="sb-info">
         <span id="sbIso">—</span>
         <span id="sbUsage">0 files</span>

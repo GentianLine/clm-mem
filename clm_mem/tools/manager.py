@@ -50,6 +50,7 @@ class Approval:
     tool: str
     args: Dict[str] = field(default_factory=dict)
     origin: str = "model"
+    chat: str = "chat-001"  # transcript slot that raised this approval
     created: float = field(default_factory=time.time)
     decided: Optional[bool] = None
     by: str = ""
@@ -61,6 +62,7 @@ class Approval:
             "tool": self.tool,
             "args": self.args,
             "origin": self.origin,
+            "chat": self.chat,
             "created": round(self.created, 3),
             "decided": self.decided,
             "by": self.by,
@@ -85,7 +87,7 @@ class ApprovalBroker:
         """Read-only tools never ask; mutating ones do under ask / deny."""
         return self.mode in ("ask", "deny") and not spec.read_only
 
-    def request(self, call: ToolCall, spec: ToolSpec) -> bool:
+    def request(self, call: ToolCall, spec: ToolSpec, chat: str = "chat-001") -> bool:
         """Blocking decision request; True means run the tool."""
         if self.mode == "auto":
             return True
@@ -98,6 +100,7 @@ class ApprovalBroker:
                 tool=call.name,
                 args=dict(call.args),
                 origin=call.origin,
+                chat=chat or "chat-001",
             )
             self.pending[rec.id] = rec
         waiter = threading.Event()
@@ -443,6 +446,8 @@ class ToolManager:
                 "status": "running",
                 "started": time.time(),
                 "finished": None,
+                # chat attribution: set via `harness.slot` at execute() time
+                "chat": getattr(self, "cur_chat", None) or "chat-001",
             }
             self.log.append(entry)
             self.log[:] = self.log[-60:]
@@ -457,8 +462,14 @@ class ToolManager:
         entry["finished"] = time.time()
         entry["duration_s"] = round(entry["finished"] - entry["started"], 3)
 
-    def execute(self, call: ToolCall) -> ToolResult:
-        """Run one tool call (with approval policy), logging both outcomes."""
+    def execute(self, call: ToolCall, chat: Optional[str] = None) -> ToolResult:
+        """Run one tool call (with approval policy), logging both outcomes.
+
+        ``chat`` attributes the activity entry (and any approval it raises)
+        to a transcript slot; omitted callers keep legacy behaviour by tagging
+        the entry ``chat-001``.
+        """
+        self.cur_chat = chat or getattr(self, "cur_chat", None) or "chat-001"
         spec = self.registry.get(call.name)
         if spec is None:
             return ToolResult(
@@ -477,7 +488,7 @@ class ToolManager:
         # sandbox exec) are approved by definition; only model-initiated ones
         # can be pending.
         if call.origin != "user" and self.broker.needs_approval(spec):
-            ok = self.broker.request(call, spec)
+            ok = self.broker.request(call, spec, chat=self.cur_chat or "chat-001")
             if not ok:
                 res = ToolResult(
                     False,
@@ -661,11 +672,27 @@ class ToolManager:
         )
 
     # -- activity --------------------------------------------------------------
-    def activity(self, limit: int = 24, full: bool = False) -> List[Dict]:
+    def activity(
+        self,
+        limit: int = 24,
+        full: bool = False,
+        chats: Optional[List[str]] = None,
+    ) -> List[Dict]:
+        """Recent tool activity, newest first.
+
+        ``chats`` filters to entries belonging to those transcript slots;
+        entries without a chat tag (or unspecced callers) pass through so
+        legacy sessions keep rendering their history.
+        """
         with self._lock:
-            tail = self.log[-limit:]
+            tail = list(self.log[-(limit if chats is None else 400) :])
+        want = set(chats) if chats else None
         out = []
         for e in tail[::-1]:
+            if want is not None:
+                c = e.get("chat") or "chat-001"
+                if c not in want:
+                    continue
             d = dict(e)
             if not full:
                 d["detail"] = (d.get("detail") or "")[:900]
@@ -677,9 +704,16 @@ class ToolManager:
             hist = [a.to_dict() for a in self.broker.resolved[-limit:]]
         return hist
 
-    def approvals(self) -> Dict:
+    def approvals(self, chats: Optional[List[str]] = None) -> Dict:
+        """Pending + resolved approvals, optionally filtered to chat slots."""
+        want = set(chats) if chats else None
+        pend = self.broker.pending_list()
+        hist = self.approval_history()
+        if want is not None:
+            pend = [p for p in pend if (p.get("chat") or "chat-001") in want]
+            hist = [h for h in hist if (h.get("chat") or "chat-001") in want]
         return {
-            "pending": self.broker.pending_list(),
-            "history": self.approval_history(),
+            "pending": pend,
+            "history": hist,
             "mode": self.broker.mode,
         }

@@ -39,6 +39,7 @@ from .processes import ProcessManager, free_port, render_flags
 
 VERSION = "0.3.0"
 SESSION_HEADER = "X-Cllm-Mem-Session"
+CHAT_HEADER = "X-Cllm-Mem-Chat"
 NATIVE_GET_PATHS = ("/props", "/metrics", "/specs")
 NATIVE_POST_PATHS = ("/completion", "/embedding")
 
@@ -46,6 +47,43 @@ NATIVE_POST_PATHS = ("/completion", "/embedding")
 # URL path segment while tagging which project sandbox a harness lives in.
 WS_PREFIX = "ws:"
 WS_NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9 ._-]{0,63}")
+
+#: A chat is a transcript slot inside a workspace session (``chat-001``).
+#: The harness keeps one shared memory per project; chats partition who *sees*
+#: what (turns, activity, approvals, drafts) without splitting the memory.
+CHAT_RE = re.compile(r"chat-(\d{3,})$")
+
+
+def chat_slot(chat: str) -> int:
+    """Zero-based slot index of a ``chat-001`` style id; -1 when it isn't one."""
+    m = CHAT_RE.match(chat or "")
+    return int(m.group(1)) - 1 if m else -1
+
+
+def _exec_chat(h, chat: Optional[str]) -> Optional[str]:
+    """Normalize a human-initiated call's chat tag against the session.
+
+    Unknown-but-valid slots get registered so the sidebar lists them; a
+    missing/invalid tag falls back to the session's newest chat (or None).
+    """
+    if chat and CHAT_RE.match(chat):
+        h.remember_chat_slot(chat)
+        return chat
+    return None
+
+
+def _chat_param(qd: Dict) -> Optional[List[str]]:
+    """Parse ``?chats=chat-001,chat-002`` into a validated slot list."""
+    raw = qd.get("chats", [""])[0]
+    if not raw:
+        return None
+    out = []
+    for c in raw.split(","):
+        c = c.strip()
+        if CHAT_RE.match(c):
+            out.append(c)
+    return out or None
+
 
 STATIC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
 MIME_TYPES = {
@@ -564,7 +602,8 @@ class ProxyHandler(BaseHTTPRequestHandler):
             if h is None:
                 return self.send_error_json(404, f"unknown session {sid!r}")
             full = qd.get("full", ["0"])[0].lower() in ("1", "true", "yes")
-            snap = h.snapshot(include_full=full)
+            chats = _chat_param(qd)
+            snap = h.snapshot(include_full=full, chats=chats)
             snap["session_id"] = sid
             # the llama.cpp window the budget is bounded by (if known)
             snap["backend_ctx"] = sup.config.backend_ctx
@@ -615,8 +654,25 @@ class ProxyHandler(BaseHTTPRequestHandler):
         sid = parts[3]
         action = parts[4]
         if action == "reset":
+            # opening a new chat: retire the live window but keep the
+            # project's memory (archive) and every other chat's state.
+            h = sup.get_session(sid)
+            if h is not None:
+                chats = body.get("chats") or []
+                keep = [c for c in chats if CHAT_RE.match(c)]
+                dropped = sup.drop_session(sid)
+                return self.send_json(
+                    {"reset": sid, "existed": dropped, "cleared_chats": keep}
+                )
             existed = sup.drop_session(sid)
             return self.send_json({"reset": sid, "existed": existed})
+        if action == "chat-open":
+            h = sup.harness_for(sid)
+            chat = str(body.get("chat", ""))
+            if not CHAT_RE.match(chat):
+                return self.send_error_json(400, f"invalid chat id {chat!r}")
+            h.remember_chat_slot(chat)
+            return self.send_json({"session_id": sid, "chat": chat, "ok": True})
         # the agent surface creates its session on demand: toggling tools or
         # poking the sandbox before a first message is legitimate UX.
         if action in (
@@ -730,14 +786,16 @@ class ProxyHandler(BaseHTTPRequestHandler):
             except ValueError:
                 limit = 24
             full = qd.get("full", ["0"])[0].lower() in ("1", "true", "yes")
+            chats = _chat_param(qd)
             return self.send_json(
                 {
                     "session_id": sid,
-                    "activity": h.tools.activity(limit=limit, full=full),
+                    "activity": h.tools.activity(limit=limit, full=full, chats=chats),
                 }
             )
         if action == "approvals":
-            return self.send_json({"session_id": sid, **h.tools.approvals()})
+            chats = _chat_param(qd)
+            return self.send_json({"session_id": sid, **h.tools.approvals(chats=chats)})
         if action == "sandbox":
             parts = [p for p in unquote(self.path.split("?")[0]).split("/") if p]
             if len(parts) == 6 and parts[5] == "file":
@@ -801,7 +859,8 @@ class ProxyHandler(BaseHTTPRequestHandler):
                     args=dict(body.get("args") or {}),
                     origin=str(body.get("origin", "user")),
                 )
-                res = h.tools.execute(call)
+                chat = str(body.get("chat", "")) or None
+                res = h.tools.execute(call, chat=_exec_chat(h, chat))
                 return self.send_json(
                     {
                         "session_id": sid,
@@ -833,7 +892,8 @@ class ProxyHandler(BaseHTTPRequestHandler):
                         },
                         origin="user",
                     )
-                    res = h.tools.execute(call)
+                    chat = str(body.get("chat", "")) or None
+                    res = h.tools.execute(call, chat=_exec_chat(h, chat))
                     return self.send_json(
                         {
                             "session_id": sid,
@@ -868,7 +928,8 @@ class ProxyHandler(BaseHTTPRequestHandler):
                     },
                     origin="user",
                 )
-                res = h.tools.execute(call)
+                chat = str(body.get("chat", "")) or None
+                res = h.tools.execute(call, chat=_exec_chat(h, chat))
                 return self.send_json(
                     {
                         "session_id": sid,
@@ -893,6 +954,8 @@ class ProxyHandler(BaseHTTPRequestHandler):
             self.send_error_json(400, "invalid JSON body")
             return
         sid = self._session_id(body)
+        chat = self.headers.get(CHAT_HEADER) or body.get("chat")
+        slot = chat_slot(str(chat).rsplit("/", 1)[-1] if chat else "")
         model = body.get("model") or cfg.served_model
 
         if not sid:  # plain llama.cpp client: passthrough
@@ -925,6 +988,9 @@ class ProxyHandler(BaseHTTPRequestHandler):
             self.send_error_json(503, f"cannot create session: {exc}")
             return
         try:
+            reply = harness.step(user_text, chat_slot=slot)
+        except TypeError:
+            # a harness (or wrapper) without chat attribution: legacy call
             reply = harness.step(user_text)
         except Exception as exc:
             self.send_error_json(502, f"backend error during step: {exc}")
@@ -1078,6 +1144,8 @@ class Supervisor:
                         "budget": h.cfg.max_context_tokens,
                         "counts": h.counts(),
                         "archive": h.archive_size(),
+                        # transcript slots this project has (sidebar chat list)
+                        "chats": h.chat_slots(),
                     }
                 )
             out.append(item)

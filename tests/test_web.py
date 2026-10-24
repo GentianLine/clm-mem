@@ -47,6 +47,10 @@ def sup(tmp_path):
             "max_context_tokens": 600,
             # mock backstop noul sits at 0.6/0.85; allow eviction
             "systemone_evict_threshold": 0.5,
+            # agent surface on, offline providers only (chat-attribution tests)
+            "tools_enabled": True,
+            "search_provider": "stub",
+            "sandbox_mode": "jail",
         },
         timeout=30,
     )
@@ -393,3 +397,127 @@ def test_remote_cfg_forget_toggles(sup):
     h.cfg.decay_enabled = True  # pushed via /settings
     st, snap = http_call(sup, "/v1/clm/sessions/ws%3Aremfg/snapshot")
     assert snap["decay_enabled"] is True
+
+
+# -- chats: transcript slots inside a workspace session ------------------------
+HDR2 = {"X-Cllm-Mem-Session": "ws:chats", "X-Cllm-Mem-Chat": "chat-001"}
+
+
+def _send(sup, text, hdr):
+    return http_call(
+        sup,
+        "/v1/chat/completions",
+        "POST",
+        {"model": "mock-model", "messages": [{"role": "user", "content": text}]},
+        hdr,
+    )
+
+
+def test_chat_slots_partition_transcripts(sup):
+    http_call(sup, "/v1/clm/workspaces", "POST", {"name": "chats"})
+    st, _ = _send(sup, "Remember: alpha fact AF-1 port 8001", HDR2)
+    assert st == 200
+
+    hdr2b = {"X-Cllm-Mem-Session": "ws:chats", "X-Cllm-Mem-Chat": "chat-002"}
+    _send(sup, "Remember: beta fact BF-2 port 8002", hdr2b)
+
+    # unfiltered snapshot sees both chats
+    st, snap = http_call(sup, "/v1/clm/sessions/ws%3Achats/snapshot")
+    turns = {b["chat"] for b in snap["blocks"]}
+    assert {"chat-001", "chat-002"} <= turns, turns
+
+    # chat-filtered snapshot only carries that chat's blocks
+    st, snap1 = http_call(sup, "/v1/clm/sessions/ws%3Achats/snapshot?chats=chat-001")
+    assert all(b["chat"] == "chat-001" for b in snap1["blocks"])
+    assert any("alpha" in b["content"] for b in snap1["blocks"])
+    assert not any("beta" in b["content"] for b in snap1["blocks"])
+
+    st, snap2 = http_call(sup, "/v1/clm/sessions/ws%3Achats/snapshot?chats=chat-002")
+    assert all(b["chat"] == "chat-002" for b in snap2["blocks"])
+
+    # the workspace listing carries the chat slots for the sidebar
+    st, ws = http_call(sup, "/v1/clm/workspaces")
+    w = [x for x in ws["workspaces"] if x["name"] == "chats"][0]
+    assert "chat-001" in w["chats"] and "chat-002" in w["chats"]
+
+    # snapshot also reports the chat inventory
+    assert set(snap["chats"]) >= {"chat-001", "chat-002"}
+
+
+def test_chat_open_registers_empty_slot(sup):
+    http_call(sup, "/v1/clm/workspaces", "POST", {"name": "chats"})
+    st, d = http_call(
+        sup,
+        "/v1/clm/sessions/ws%3Achats/chat-open",
+        "POST",
+        {"chat": "chat-005"},
+    )
+    assert st == 200 and d["ok"]
+    st, ws = http_call(sup, "/v1/clm/workspaces")
+    w = [x for x in ws["workspaces"] if x["name"] == "chats"][0]
+    assert "chat-005" in w["chats"]
+
+    st, _ = http_call(
+        sup,
+        "/v1/clm/sessions/ws%3Achats/chat-open",
+        "POST",
+        {"chat": "evil/../x"},
+    )
+    assert st == 400
+
+
+def test_chat_activity_filtering(sup):
+    http_call(sup, "/v1/clm/workspaces", "POST", {"name": "chats"})
+    st, d = http_call(
+        sup,
+        "/v1/clm/sessions/ws%3Achats/search",
+        "POST",
+        {"query": "hello world", "max_results": 2, "chat": "chat-001"},
+        HDR2,
+    )
+    assert st == 200 and len(d["hits"]) == 2
+
+    st, acts = http_call(
+        sup, "/v1/clm/sessions/ws%3Achats/activity?chats=chat-001", headers=HDR2
+    )
+    chats = {a.get("chat") for a in acts["activity"]}
+    assert chats == {"chat-001"}, chats
+
+    st, acts2 = http_call(
+        sup, "/v1/clm/sessions/ws%3Achats/activity?chats=chat-002", headers=HDR2
+    )
+    assert acts2["activity"] == []  # nothing happened in chat-002
+
+
+def test_reset_keeps_archive_and_chat_state(sup):
+    http_call(sup, "/v1/clm/workspaces", "POST", {"name": "chats"})
+    hdr = {
+        "X-Cllm-Mem-Session": "ws:chats",
+        "X-Cllm-Mem-Chat": "chat-001",
+    }
+    _send(sup, "Remember: gamma fact GG-3 port 8003", hdr)
+
+    filler = "chatter filler that eats tokens " * 20
+    for _ in range(6):
+        _send(sup, filler, hdr)
+
+    st, snap1 = http_call(sup, "/v1/clm/sessions/ws%3Achats/snapshot?chats=chat-001")
+    assert snap1["turn"] > 1
+
+    st, r = http_call(
+        sup,
+        "/v1/clm/sessions/ws%3Achats/reset",
+        "POST",
+        {"chats": ["chat-002"]},
+    )
+    assert st == 200 and r["existed"] is True
+
+    # a fresh session for chat-002 starts empty of chat-001's transcript
+    hdr2 = {
+        "X-Cllm-Mem-Session": "ws:chats",
+        "X-Cllm-Mem-Chat": "chat-002",
+    }
+    _send(sup, "Remember: delta fact DD-4 port 8004", hdr2)
+    st, snap2 = http_call(sup, "/v1/clm/sessions/ws%3Achats/snapshot?chats=chat-002")
+    assert any("delta" in b["content"] for b in snap2["blocks"])
+    assert all(b["chat"] == "chat-002" for b in snap2["blocks"])
