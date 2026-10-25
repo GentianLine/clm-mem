@@ -330,11 +330,17 @@ def _tool_result(sup, name: str, args: Dict[str, Any]) -> Dict:
             return _agent_result(sup, sid, name, args)
         if name == "clm_open_session":
             opts = args.get("options") or {}
+            fresh: List[bool] = []
             try:
-                h = sup.harness_for(sid, str(args.get("model", "")), overrides=opts)
+                h = sup.harness_for(
+                    sid,
+                    str(args.get("model", "")),
+                    overrides=opts,
+                    created_out=fresh,
+                )
             except ValueError as exc:
                 return _text(f"cannot open session: {exc}", is_error=True)
-            created = getattr(h, "_branch_created", False)
+            created = bool(fresh) and fresh[0]
             return _text(
                 json.dumps(
                     {

@@ -260,6 +260,29 @@ def test_session_list_reset_delete(sup):
     assert st == 200 and msg["deleted"] == "ws:bob"
 
 
+def test_reopen_never_reports_created(sup):
+    # Regression: a reopened branch used to report created:true (and HTTP 201)
+    # because harness_for() signalled creation through a per-harness attribute
+    # its cache-hit early-return never updated -- so the flag kept reading
+    # whatever whoever-created-it left behind. First open is created:true/201;
+    # every subsequent open (same in-memory session, or after a drop) must be
+    # created:false/200.
+    st1, d1 = http_call(sup, "/v1/clm/sessions", "POST", {"session": "ws:carol"})
+    assert st1 == 201 and d1["created"] is True
+
+    # reopen while the harness is still cached (no drop in between)
+    st2, d2 = http_call(sup, "/v1/clm/sessions", "POST", {"session": "ws:carol"})
+    assert st2 == 200 and d2["created"] is False, d2
+
+    # drop, then reopen -- a fresh harness must still report created:true once
+    http_call(sup, "/v1/clm/sessions/ws:carol", "DELETE")
+    st3, d3 = http_call(sup, "/v1/clm/sessions", "POST", {"session": "ws:carol"})
+    assert st3 == 201 and d3["created"] is True, d3
+    # ...and the reopen after that must be false again (flag does not stick)
+    st4, d4 = http_call(sup, "/v1/clm/sessions", "POST", {"session": "ws:carol"})
+    assert st4 == 200 and d4["created"] is False, d4
+
+
 def test_unknown_session_status_404(sup):
     st, _ = http_call(sup, "/v1/clm/sessions/nobody/status")
     assert st == 404

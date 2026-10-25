@@ -785,13 +785,14 @@ class ProxyHandler(BaseHTTPRequestHandler):
             if not WS_NAME_RE.fullmatch(name):
                 return self.send_error_json(400, f"invalid workspace name {name!r}")
             model = str(body.get("model") or "")
+            fresh: List[bool] = []
             try:
-                h = sup.harness_for(sid, model, overrides=opts)
+                h = sup.harness_for(sid, model, overrides=opts, created_out=fresh)
             except ValueError as exc:
                 return self.send_error_json(400, f"cannot open session: {exc}")
             except Exception as exc:  # pragma: no cover - backend down
                 return self.send_error_json(503, f"cannot open session: {exc}")
-            created = getattr(h, "_branch_created", False)
+            created = bool(fresh) and fresh[0]
             with sup.lock:
                 m = dict(sup.meta.get(sid, {}))
             cfgc = h.cfg
@@ -1338,6 +1339,7 @@ class Supervisor:
         model: str = "",
         chat: Optional[str] = None,
         overrides: Optional[Dict] = None,
+        created_out: Optional[List] = None,
     ):
         """Get-or-create the :class:`MemoryHarness` behind a session id.
 
@@ -1349,10 +1351,19 @@ class Supervisor:
         server defaults -- they only apply when a branch is *created*;
         reopening an existing branch leaves its live config alone (the
         turns/settings endpoints own that).
+
+        Creation vs reopen is reported through ``created_out``: pass a list and
+        this appends exactly one boolean -- True only when *this* call installed
+        the harness, False on a cache hit or a lost creation race. The signal is
+        deliberately not an attribute on the harness: a per-object flag keeps
+        reading whatever value whoever-created-it left behind, which made every
+        reopened branch report ``created: true`` (and HTTP 201).
         """
         with self.lock:
             h = self.sessions.get(sid)
             if h is not None:
+                if created_out is not None:
+                    created_out.append(False)  # cache hit: never a fresh branch
                 return h
         cfg = self.config
         kwargs = dict(cfg.harness_kwargs or {})
@@ -1403,6 +1414,8 @@ class Supervisor:
         with self.lock:
             existing = self.sessions.get(sid)  # another thread raced us
             created = existing is None
+            if created_out is not None:
+                created_out.append(created)
             if existing is not None:
                 h = existing
             else:
@@ -1425,7 +1438,6 @@ class Supervisor:
                 except Exception:
                     pass
                 m.setdefault("chats", set()).add(c)
-            h._branch_created = created  # type: ignore[attr-defined]
             return h
 
     def get_session(self, sid: str):
