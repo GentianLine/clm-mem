@@ -56,6 +56,40 @@ def test_sandbox_output_capped(sb):
     assert len(res.stdout) <= sb.output_limit + 64
 
 
+def test_fork_exhaustion_is_diagnosed_not_opaque(sb, monkeypatch):
+    # When the shell can't fork children (host process ceiling / RLIMIT_NPROC),
+    # the exec result should say so instead of leaving an opaque exit code.
+    from clm_mem.tools import sandbox as _sb
+
+    class _FakeProc:
+        returncode = 254
+
+        def communicate(self, timeout=None):
+            return (
+                b"/bin/sh: fork: retry: Resource temporarily unavailable\n"
+                b"/bin/sh: fork: Resource temporarily unavailable\n",
+                None,
+            )
+
+    monkeypatch.setattr(_sb.subprocess, "Popen", lambda *a, **k: _FakeProc())
+    res = sb.exec("git clone https://example.com/x.git")
+    assert not res.ok
+    assert "process limit" in res.note.lower()
+    assert "resource temporarily unavailable" in res.stdout.lower()
+
+
+def test_fork_exhaustion_detector():
+    from clm_mem.tools import sandbox as _sb
+
+    log = (
+        "/bin/sh: fork: retry: Resource temporarily unavailable\n"
+        "/bin/sh: fork: Resource temporarily unavailable\n"
+    )
+    assert _sb._looks_like_fork_exhaustion(log)
+    assert not _sb._looks_like_fork_exhaustion("hello world\nexit 0")
+    assert not _sb._looks_like_fork_exhaustion("")
+
+
 def test_sandbox_path_containment(sb):
     with pytest.raises(ValueError):
         sb.write_file("../escape.txt", "x")
@@ -131,6 +165,37 @@ def test_provider_off_blocks_web(tmp_path):
     h = MemoryHarness(StubChat(), cfg_of(tmp_path, search_provider="off"))
     res = h.tools.execute(ToolCall(id="1", name="web_search", args={"query": "x"}))
     assert not res.ok and "disabled" in res.error
+
+
+def test_ddg_challenge_page_is_error_not_zero_hits(tmp_path, monkeypatch):
+    # DuckDuckGo's HTML endpoint can answer an anti-bot challenge (HTTP 202 +
+    # "select all squares containing a duck") instead of results. The old code
+    # parsed that as zero hits and reported a misleading '0 hits'; now it must
+    # surface the block so the agent knows to switch providers / retry.
+    from clm_mem.tools import web as _web
+
+    challenge = (
+        ("<html><body>")
+        + "<!-- DuckDuckGo -->"
+        + (
+            '<div class="challenge-form">'
+            "Please complete the following challenge to confirm this search was made by a human."
+            "Select all squares containing a duck: Submit</div></body></html>"
+        )
+    )
+
+    def fake_get(url, headers=None, timeout=15.0, max_bytes=400_000):
+        return 202, challenge
+
+    monkeypatch.setattr(_web, "_get", fake_get)
+    h = MemoryHarness(StubChat(), cfg_of(tmp_path, search_provider="ddg"))
+    res = h.tools.execute(
+        ToolCall(id="1", name="web_search", args={"query": "top news today"})
+    )
+    assert not res.ok
+    assert "anti-bot challenge" in (res.error + res.summary).lower()
+    # and it must NOT be reported as a successful zero-hit search
+    assert res.summary != 'web_search "top news today" -> 0 hits'
 
 
 def test_auto_policy_runs_exec(h):

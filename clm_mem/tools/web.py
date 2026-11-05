@@ -88,12 +88,32 @@ class WebError(RuntimeError):
     pass
 
 
+# Text that appears on an anti-bot interstitial (challenge) page but never on a
+# genuine results page. DuckDuckGo's HTML endpoint is the common case: it returns
+# HTTP 202 plus a "select all squares containing a duck" challenge, so the result
+# parser finds nothing and would otherwise report a misleading "0 hits".
+_CHALLENGE_MARKERS = (
+    "challenge-form",
+    "select all squares containing a duck",
+    "complete the following challenge",
+    "confirm this search was made by a human",
+    "anomaly-modal",
+    "please verify you are a human",
+    "verify you are human",
+)
+
+
 def _get(
     url: str,
     headers: Optional[Dict[str, str]] = None,
     timeout: float = 15.0,
     max_bytes: int = 400_000,
-) -> str:
+) -> tuple[int, str]:
+    """GET ``url`` and return ``(status_code, body_text)``.
+
+    Returns the status so callers can tell an anti-bot interstitial (e.g. a
+    challenge page served with HTTP 202) apart from a genuine empty result set.
+    """
     host = urllib.parse.urlparse(url).hostname or ""
     if host in BLOCKED_HOSTS:
         raise WebError(f"refused fetch of blocked host {host}")
@@ -101,7 +121,7 @@ def _get(
         url, headers={"User-Agent": UA, "Accept-Language": "en", **(headers or {})}
     )
     with urllib.request.urlopen(req, timeout=timeout) as r:
-        return r.read(max_bytes).decode(errors="replace")
+        return int(r.status), r.read(max_bytes).decode(errors="replace")
 
 
 # ---------------------------------------------------------------- providers
@@ -126,7 +146,18 @@ def search_stub(query: str, limit: int = 5) -> List[Dict[str, str]]:
 
 def search_ddg(query: str, limit: int = 5) -> List[Dict[str, str]]:
     body = urllib.parse.urlencode({"q": query, "kl": "us-en"})
-    raw = _get(f"https://html.duckduckgo.com/html/?{body}")
+    status, raw = _get(f"https://html.duckduckgo.com/html/?{body}")
+    # DuckDuckGo serves an anti-bot challenge (HTTP 202 + "select all squares
+    # containing a duck") instead of results. The parser below would then find
+    # nothing and report a misleading "0 hits"; surface the real cause instead.
+    low = raw.lower()
+    if any(marker in low for marker in _CHALLENGE_MARKERS):
+        raise WebError(
+            f"web_search (ddg): search engine served an anti-bot challenge "
+            f"(HTTP {status}), not results. Try a different provider "
+            f"(--search-provider brave/tavily/exa) or retry later; this is a "
+            f"provider block, not 'no results'."
+        )
     hits = []
     for m in _DDG_RESULT.finditer(raw):
         href = _clean_ddg_href(m.group("href"))
@@ -150,7 +181,7 @@ def search_brave(query: str, limit: int = 5) -> List[Dict[str, str]]:
     if not key:
         raise WebError("brave provider needs BRAVE_API_KEY")
     body = urllib.parse.urlencode({"q": query, "count": max(1, min(limit, 10))})
-    raw = _get(
+    status, raw = _get(
         f"https://api.search.brave.com/res/v1/web/search?{body}",
         {
             "Accept": "application/json",
@@ -158,6 +189,8 @@ def search_brave(query: str, limit: int = 5) -> List[Dict[str, str]]:
             "X-Subscription-Token": key,
         },
     )
+    if status >= 400:
+        raise WebError(f"brave provider returned HTTP {status}")
     data = json.loads(raw)
     hits = [
         {
@@ -238,7 +271,7 @@ def fetch_page(url: str, limit: int = 6000) -> Dict[str, object]:
     """Fetch one page as readable text (title + body)."""
     if "://" not in url:
         url = "https://" + url
-    raw = _get(url, max_bytes=min(400_000, limit * 40))
+    _status, raw = _get(url, max_bytes=min(400_000, limit * 40))
     title = ""
     m = re.search(r"<title[^>]*>(.*?)</title>", raw, re.I | re.S)
     if m:

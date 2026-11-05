@@ -69,6 +69,27 @@ TEXT_EXTS = {
 }
 
 
+_FORK_EXHAUSTION_MARKERS = (
+    "resource temporarily unavailable",
+    "cannot fork",
+    "no child processes",
+    "out of memory: cannot allocate",
+)
+
+
+def _looks_like_fork_exhaustion(output: str) -> bool:
+    """True when command output shows the shell failing to fork children.
+
+    ``/bin/sh`` prints ``fork: retry: Resource temporarily unavailable`` (and
+    eventually gives up with a non-zero exit) when it cannot create processes --
+    either the host per-user process ceiling or our own RLIMIT_NPROC was reached.
+    """
+    if not output:
+        return False
+    low = output.lower()
+    return any(marker in low for marker in _FORK_EXHAUSTION_MARKERS)
+
+
 @dataclass
 class ExecResult:
     ok: bool
@@ -236,6 +257,17 @@ class Sandbox:
         note = ""
         if timed_out:
             note = f"killed after {limit:.0f}s timeout"
+        elif _looks_like_fork_exhaustion(out):
+            # The command's own subprocesses hit the host per-user process ceiling
+            # (or RLIMIT_NPROC), so /bin/sh could not fork. This is a resource
+            # condition, not a bug in the command -- say so instead of leaving an
+            # opaque exit code to guess at.
+            note = (
+                "process limit hit: the sandbox could not spawn child processes "
+                "(fork returned 'Resource temporarily unavailable'). This is a host "
+                "resource condition, not a failure of the command itself. Retry when "
+                "the machine has more headroom, or reduce concurrency."
+            )
         return ExecResult(
             ok=(proc.returncode == 0 and not timed_out),
             code=-1 if proc.returncode is None else int(proc.returncode),
