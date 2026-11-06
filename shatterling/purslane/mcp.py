@@ -13,7 +13,7 @@ import json
 from typing import Any, Dict, List, Optional
 
 from .server import VERSION as SERVER_VERSION
-from .tools import ToolCall
+from ..tools import ToolCall
 
 PROTOCOL_VERSION = "2025-06-18"
 SERVER_INFO = {

@@ -15,7 +15,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import pytest
 
-from clm_mem import start_supervisor
+from shatterling.purslane.server import start_supervisor
 
 
 def make_stub(key="", sys_key=""):

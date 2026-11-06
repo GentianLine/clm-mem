@@ -1,8 +1,8 @@
 """Tests for the two forgetting strategies (decay & reheating, supersede)."""
 
 import json
-from clm_mem import HarnessConfig, LONG, MemoryHarness, SHORT, StubChat, TRANSIENT
-from clm_mem.harness import BASE_IMPORTANCE
+from shatterling import HarnessConfig, LONG, MemoryHarness, SHORT, StubChat, TRANSIENT
+from shatterling.engine.harness import BASE_IMPORTANCE
 
 
 def make_harness(tmp_path, **kw) -> MemoryHarness:

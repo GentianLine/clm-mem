@@ -168,7 +168,7 @@ class ProcessManager:
     # -- convenience ---------------------------------------------------------
     def mock_argv(self, kind: str) -> List[str]:
         """Command line that runs one of the bundled mock backends."""
-        return [sys.executable, "-m", "clm_mem.mock_backends", "--kind", kind]
+        return [sys.executable, "-m", "shatterling.purslane.mock_backends", "--kind", kind]
 
     def __enter__(self):
         return self

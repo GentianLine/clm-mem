@@ -5,13 +5,13 @@ Two kinds of mock server live here:
 
 * ``llm`` -- an OpenAI-compatible chat server (plus the llama.cpp native
   routes ``/completion``, ``/props``, ``/metrics``, ``/version``) driven by
-  :class:`clm_mem.llm.StubChat`.
+  :class:`shatterling.engine.llm.StubChat`.
 * ``systemone`` -- the System One Lite decision API
-  (``POST /v1/systemone``) driven by :class:`clm_mem.llm.MockSystemOne`.
+  (``POST /v1/systemone``) driven by :class:`shatterling.engine.llm.MockSystemOne`.
 
 Run them as modules:
-    python -m clm_mem.mock_backends --kind llm       --host 127.0.0.1 --port 8081
-    python -m clm_mem.mock_backends --kind systemone --host 127.0.0.1 --port 8010
+    python -m shatterling.purslane.mock_backends --kind llm       --host 127.0.0.1 --port 8081
+    python -m shatterling.purslane.mock_backends --kind systemone --host 127.0.0.1 --port 8010
 
 Once listening they print a single READY line on stdout:
     {"ready": true, "pid": ..., "host": "...", "port": ...}
@@ -89,7 +89,7 @@ class LLMHandler(_Silent):
     MODEL = os.environ.get("CLM_MEM_MODEL", "mock-model")
 
     def setup_chat(self):
-        from .llm import StubChat  # lazy, keeps stdlib-only startup
+        from ..engine.llm import StubChat  # lazy, keeps stdlib-only startup
 
         if getattr(type(self), "_chat", None) is None:
             type(self)._chat = StubChat()  # shared across requests (stateless anyway)
@@ -109,7 +109,7 @@ class LLMHandler(_Silent):
         """Reply as a message dict, honouring ``tools`` with real tool_calls.
 
         The bundled stub plans one deterministic call per turn (see
-        :class:`clm_mem.llm.StubChat.chat_tools`), so the whole agent loop --
+        :class:`shatterling.engine.llm.StubChat.chat_tools`), so the whole agent loop --
         web search, sandbox exec, file work -- is exercisable without a GPU.
         """
         if chat is None:
@@ -275,7 +275,7 @@ class SystemOneHandler(_Silent):
         if path not in self.SYSTEMONE_PATHS:
             self.send_json({"error": "not found", "path": path}, 404)
             return
-        from .llm import MockSystemOne  # lazy
+        from ..engine.llm import MockSystemOne  # lazy
 
         body = self.read_body()
         mock = MockSystemOne()
@@ -311,12 +311,12 @@ def serve_forever_with_mock(kind: str, host: str = "127.0.0.1", port: int = 0):
 
 def main(argv=None):
     p = argparse.ArgumentParser(
-        prog="clm_mem.mock_backends",
+        prog="shatterling.purslane.mock_backends",
         description="Mock llama.cpp / SystemOne HTTP backends for testing.",
     )
     p.add_argument("--kind", required=True, choices=sorted(HANDLERS))
     # ProcessManager exports CLM_MEM_HOST / CLM_MEM_PORT; fall back to them so
-    # a bare `python -m clm_mem.mock_backends --kind llm` binds the right port.
+    # a bare `python -m shatterling.purslane.mock_backends --kind llm` binds the right port.
     p.add_argument("--host", default=os.environ.get("CLM_MEM_HOST", "127.0.0.1"))
     p.add_argument("--port", type=int, default=int(os.environ.get("CLM_MEM_PORT", "0")))
     a = p.parse_args(argv)

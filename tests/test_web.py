@@ -7,7 +7,7 @@ import os
 import urllib.error
 import urllib.request
 import pytest
-from clm_mem import start_supervisor
+from shatterling.purslane.server import start_supervisor
 
 
 def http_call(sup, path, method="GET", body=None, headers=None):
@@ -268,9 +268,9 @@ def test_mcp_notification_accepted_202(sup):
 
 # -- remote attach client ------------------------------------------------------
 def test_remote_harness_matches_server(sup):
-    from clm_mem.remote import connect
+    from shatterling.clients.sdk import connect as _connect_remote
 
-    h = connect(f"{sup.public_base}", workspace="remote")
+    h = _connect_remote(f"{sup.public_base}", workspace="remote")
     reply = h.step("Remember: remote fact RK-1 port 8051")
     assert reply
     assert "turn=1" in h.status()
@@ -292,7 +292,7 @@ def test_remote_harness_matches_server(sup):
 
 
 def test_remote_step_header_used(sup):
-    from clm_mem.remote import RemoteHarness
+    from shatterling.clients.sdk import RemoteHarness
 
     h = RemoteHarness(f"{sup.public_base}", session="ws:hdrcheck")
     h.step("hello there")
@@ -384,7 +384,7 @@ def test_mcp_set_forget_tool(sup):
 
 def test_remote_cfg_forget_toggles(sup):
     """The remote attach client exposes the same toggles as local.cfg."""
-    from clm_mem.remote import RemoteHarness
+    from shatterling.clients.sdk import RemoteHarness
 
     h = RemoteHarness(f"{sup.public_base}", session="ws:remfg")
     h.step("hello there")  # creates the session

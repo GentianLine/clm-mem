@@ -37,10 +37,10 @@ from dataclasses import asdict as _dc_asdict, dataclass, field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Dict, List, Optional
 from urllib.parse import parse_qs, unquote
-from .config import HarnessConfig
-from .harness import MemoryHarness
-from .llm import OpenAIChat
-from .tools import ToolCall
+from ..engine.config import HarnessConfig
+from ..engine.harness import MemoryHarness
+from ..engine.llm import OpenAIChat
+from ..tools import ToolCall
 from .processes import ProcessManager, free_port, render_flags
 
 VERSION = "0.3.0"
@@ -147,7 +147,9 @@ def _chat_param(qd: Dict) -> Optional[List[str]]:
     return out or None
 
 
-STATIC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
+STATIC_DIR = os.path.normpath(
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "campion")
+)
 MIME_TYPES = {
     ".html": "text/html; charset=utf-8",
     ".css": "text/css; charset=utf-8",
@@ -1384,7 +1386,7 @@ class Supervisor:
         )
         systemone = None
         if cfg.systemone_endpoint:
-            from .llm import SystemOneClient
+            from ..engine.llm import SystemOneClient
 
             # fork passthrough: the decision server *is* the chat backend, so
             # a key configured for one authenticates both hops

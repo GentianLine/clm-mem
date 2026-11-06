@@ -15,9 +15,10 @@ CSS/JS actually rely on:
 import os
 import re
 
-import clm_mem
+import shatterling as _clm_mod
 
-STATIC = os.path.join(os.path.dirname(clm_mem.__file__), "static")
+STATIC = os.path.normpath(
+    os.path.join(os.path.dirname(_clm_mod.__file__), "campion"))
 
 
 def read(name: str) -> str:

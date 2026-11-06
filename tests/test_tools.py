@@ -10,8 +10,11 @@ import os
 import urllib.error
 import urllib.request
 import pytest
-from clm_mem import HarnessConfig, MemoryHarness, StubChat, start_supervisor
-from clm_mem.tools import ToolCall, Sandbox
+from shatterling.purslane.server import start_supervisor
+from shatterling.engine.harness import MemoryHarness
+from shatterling.engine.llm import StubChat
+from shatterling.engine.config import HarnessConfig
+from shatterling.tools import ToolCall, Sandbox
 
 # ------------------------------------------------------------------ sandbox
 
@@ -59,7 +62,7 @@ def test_sandbox_output_capped(sb):
 def test_fork_exhaustion_is_diagnosed_not_opaque(sb, monkeypatch):
     # When the shell can't fork children (host process ceiling / RLIMIT_NPROC),
     # the exec result should say so instead of leaving an opaque exit code.
-    from clm_mem.tools import sandbox as _sb
+    from shatterling.tools import sandbox as _sb
 
     class _FakeProc:
         returncode = 254
@@ -79,7 +82,7 @@ def test_fork_exhaustion_is_diagnosed_not_opaque(sb, monkeypatch):
 
 
 def test_fork_exhaustion_detector():
-    from clm_mem.tools import sandbox as _sb
+    from shatterling.tools import sandbox as _sb
 
     log = (
         "/bin/sh: fork: retry: Resource temporarily unavailable\n"
@@ -172,7 +175,7 @@ def test_ddg_challenge_page_is_error_not_zero_hits(tmp_path, monkeypatch):
     # "select all squares containing a duck") instead of results. The old code
     # parsed that as zero hits and reported a misleading '0 hits'; now it must
     # surface the block so the agent knows to switch providers / retry.
-    from clm_mem.tools import web as _web
+    from shatterling.tools import web as _web
 
     challenge = (
         ("<html><body>")
@@ -459,7 +462,7 @@ def test_serve_direct_web_search(sup):
 
 def test_cli_agent_slash_commands_local(h):
     """handle_agent_command drives the same agent surface as /tools etc."""
-    from clm_mem.cli import handle_agent_command
+    from shatterling.cli import handle_agent_command
 
     seen = handle_agent_command(h, "/tools", 0)
     out = handle_agent_command(h, "/web unsloth", seen)
@@ -487,7 +490,7 @@ def test_cli_responder_approves_local_ask(tmp_path):
     import builtins
 
     h = MemoryHarness(StubChat(), cfg_of(tmp_path, approval_mode="ask"))
-    from clm_mem.cli import _install_prompt_responder
+    from shatterling.cli import _install_prompt_responder
 
     answers = iter(["a"])  # "always" -> auto afterwards
     orig = builtins.input

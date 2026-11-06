@@ -6,7 +6,7 @@ import json
 import urllib.error
 import urllib.request
 import pytest
-from clm_mem import start_supervisor
+from shatterling.purslane.server import start_supervisor
 
 
 def http_call(sup, path, method="GET", body=None, headers=None):
@@ -339,8 +339,8 @@ def test_systemone_client_sends_model_to_canonical_path():
     """Regression: the client sends the required 'model' field and POSTs to
     its configured URL verbatim -- the complete endpoint URL, never treated
     as a root to append paths to."""
-    from clm_mem.llm import SystemOneClient
-    from clm_mem.processes import ProcessManager, free_port
+    from shatterling.engine.llm import SystemOneClient
+    from shatterling.purslane.processes import ProcessManager, free_port
 
     mgr = ProcessManager()
     try:
@@ -475,7 +475,7 @@ def test_proxy_uses_the_configured_endpoint_verbatim(sup):
     decision server is recorded via a spy on urlopen -- process-global, hence
     serially executed by pytest's default ordering -- and must equal the
     configured endpoint URL byte for byte)."""
-    import clm_mem.server as server_mod
+    import shatterling.purslane.server as server_mod
 
     hits = []
     real_urlopen = urllib.request.urlopen
@@ -540,7 +540,7 @@ def test_supervisor_spawns_and_kills_processes(tmp_path):
 
 def test_external_backend_mode(tmp_path):
     """backend_mode='external' proxies a server we did not spawn."""
-    from clm_mem.processes import ProcessManager
+    from shatterling.purslane.processes import ProcessManager
 
     mgr = ProcessManager()
     try:
@@ -589,7 +589,7 @@ def test_spawn_full_command_with_placeholders(tmp_path):
         backend_cmd=[
             sys.executable,
             "-m",
-            "clm_mem.mock_backends",
+            "shatterling.purslane.mock_backends",
             "--kind",
             "llm",
             "--host",

@@ -5,10 +5,10 @@ import argparse
 import sys
 import textwrap
 from typing import Dict, List, Optional
-from .blocks import LONG, SHORT
-from .config import DEFAULT_CTX_BUDGET, HarnessConfig
-from .harness import MemoryHarness
-from .llm import OpenAIChat, StubChat, SystemOneClient
+from .engine.blocks import LONG, SHORT
+from .engine.config import DEFAULT_CTX_BUDGET, HarnessConfig
+from .engine.harness import MemoryHarness
+from .engine.llm import OpenAIChat, StubChat, SystemOneClient
 
 HELP = (
     "commands:  /status   /long   /short   /transient   /recall <text>   "
@@ -376,7 +376,7 @@ def chat_loop(h: MemoryHarness) -> None:
         if text in ("/long", "/short", "/transient") or text.startswith(
             ("/long ", "/short ", "/transient ")
         ):
-            from .blocks import TRANSIENT
+            from .engine.blocks import TRANSIENT
 
             want = {"/long": LONG, "/short": SHORT, "/transient": TRANSIENT}[
                 text.split()[0]
@@ -727,7 +727,7 @@ def cmd_chat(a: argparse.Namespace) -> None:
         # Attach this prompt to a running `clm-mem serve`: RemoteHarness
         # opens the branch once (POST /v1/clm/sessions) and turns from
         # there -- exactly what the web studio's app.js does.
-        from .remote import connect as open_remote
+        from .clients.sdk import connect as open_remote
 
         h = open_remote(
             a.connect,
@@ -766,7 +766,7 @@ def cmd_chat(a: argparse.Namespace) -> None:
     if a.max_context_tokens is None:
         # follow the served window: llama.cpp fixes its context at load time,
         # so mirror it instead of letting the two budgets drift.
-        from .server import discover_backend_ctx, normalize_root
+        from .purslane.server import discover_backend_ctx, normalize_root
 
         ctx = discover_backend_ctx(normalize_root(a.base_url), api_key=a.api_key)
         a.max_context_tokens = ctx or DEFAULT_CTX_BUDGET
@@ -832,7 +832,7 @@ def cmd_demo(a: argparse.Namespace) -> None:
     cfg.max_context_tokens = min(cfg.max_context_tokens, 2048)
 
     # Use mock SystemOne to exercise typed decision code paths offline
-    from .llm import MockSystemOne
+    from .engine.llm import MockSystemOne
 
     h = MemoryHarness(StubChat(), cfg, systemone=MockSystemOne())
     print("demo mode: using mock SystemOne (no HTTP calls)")
@@ -984,7 +984,7 @@ def cmd_serve(a: argparse.Namespace) -> None:
     import dataclasses as _dc
     import json as _json
     import time as _time
-    from .server import start_supervisor
+    from .purslane.server import start_supervisor
 
     harness_kwargs = _dc.asdict(_cfg(a, ""))
     if a.max_context_tokens is None:

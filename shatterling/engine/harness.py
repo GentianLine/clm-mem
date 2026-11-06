@@ -45,7 +45,7 @@ from .tagging import (
     strip_tags,
 )
 from .tokens import TokenCounter
-from .tools import ToolCall, parse_llm_tool_calls, render_call
+from ..tools import ToolCall, parse_llm_tool_calls, render_call
 
 
 class MemoryHarness:
@@ -85,7 +85,7 @@ class MemoryHarness:
         self.cfg = cfg or HarnessConfig()
         self.systemone = systemone
         self.tools_root = tools_root or os.path.join(self.cfg.workdir, "sandbox")
-        from .tools import ToolManager  # here, not at import time, so the
+        from ..tools import ToolManager  # here, not at import time, so the
 
         self.tools = ToolManager(
             self.cfg, root=self.tools_root, responder=responder  # package stays

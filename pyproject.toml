@@ -1,6 +1,6 @@
 [project]
-name = "clm-mem"
-version = "0.3.0"
+name = "shatterling"
+version = "0.4.0"
 description = "Zero-training long/short-term memory harness for open chat models (Qwen etc.), inspired by Context Language Models (arXiv:2609.37725)"
 readme = "README.md"
 license = { text = "MIT" }
@@ -18,10 +18,11 @@ tokens = ["transformers>=4.40"]   # exact token counting with the served model's
 dev = ["pytest>=8"]
 
 [project.scripts]
-clm-mem = "clm_mem.cli:main"
+purslane = "shatterling.cli:main"
+clm-mem = "shatterling.cli:main"   # deprecated alias, remove in 0.5
 
 [tool.setuptools.packages.find]
-include = ["clm_mem*"]
+include = ["shatterling*"]
 
 [tool.setuptools.package-data]
-clm_mem = ["static/*"]
+"shatterling.campion" = ["*.html", "*.js", "*.css", "*.svg"]

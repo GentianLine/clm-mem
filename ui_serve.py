@@ -1,5 +1,5 @@
 import json, sys, time
-from clm_mem import start_supervisor
+from shatterling.purslane.server import start_supervisor
 
 sup = start_supervisor(
     public_port=8717,

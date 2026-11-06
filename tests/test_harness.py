@@ -2,7 +2,7 @@
 
 import json
 import pytest
-from clm_mem import (
+from shatterling import (
     HarnessConfig,
     LONG,
     MemoryHarness,
@@ -11,7 +11,7 @@ from clm_mem import (
     TRANSIENT,
     split_tagged,
 )
-from clm_mem.tagging import strip_tags
+from shatterling.engine.tagging import strip_tags
 
 
 def make_harness(tmp_path, **kw) -> MemoryHarness:
@@ -123,8 +123,8 @@ def test_phase3_offloads_longterm_with_pointer(tmp_path):
 # -- end-to-end -------------------------------------------------------------------
 # --- SystemOne integration tests -------------------------------------------
 
-from clm_mem.llm import MockSystemOne
-from clm_mem.blocks import LONG, SHORT, TRANSIENT
+from shatterling.engine.llm import MockSystemOne
+from shatterling.engine.blocks import LONG, SHORT, TRANSIENT
 
 
 def test_mock_systemone_classify_longterm():
@@ -161,8 +161,8 @@ def test_mock_systemone_should_evict():
 
 def test_systemone_preclassification_in_step(tmp_path):
     """User inputs should be pre-classified before being sent to LLM."""
-    from clm_mem.harness import MemoryHarness
-    from clm_mem.llm import StubChat
+    from shatterling.engine.harness import MemoryHarness
+    from shatterling.engine.llm import StubChat
 
     h = MemoryHarness(StubChat(), systemone=MockSystemOne())
     h.cfg.workdir = str(tmp_path)
@@ -182,8 +182,8 @@ def test_systemone_preclassification_in_step(tmp_path):
 
 def test_systemone_preclassification_transient(tmp_path):
     """Small talk should be pre-classified as transient."""
-    from clm_mem.harness import MemoryHarness
-    from clm_mem.llm import StubChat
+    from shatterling.engine.harness import MemoryHarness
+    from shatterling.engine.llm import StubChat
 
     h = MemoryHarness(StubChat(), systemone=MockSystemOne())
     h.cfg.workdir = str(tmp_path)
@@ -196,8 +196,8 @@ def test_systemone_preclassification_transient(tmp_path):
 
 def test_batched_eviction_backstop(tmp_path):
     """Eviction backstops should batch SystemOne calls."""
-    from clm_mem.harness import MemoryHarness
-    from clm_mem.llm import StubChat, MockSystemOne
+    from shatterling.engine.harness import MemoryHarness
+    from shatterling.engine.llm import StubChat, MockSystemOne
 
     h = MemoryHarness(StubChat(), systemone=MockSystemOne())
     h.cfg.workdir = str(tmp_path)
@@ -217,8 +217,8 @@ def test_batched_eviction_backstop(tmp_path):
 
 def test_phase3_backstop_keeps_longterm(tmp_path):
     """Phase 3 should consult SystemOne before offloading longterm memory."""
-    from clm_mem.harness import MemoryHarness
-    from clm_mem.llm import StubChat, MockSystemOne
+    from shatterling.engine.harness import MemoryHarness
+    from shatterling.engine.llm import StubChat, MockSystemOne
 
     h = MemoryHarness(StubChat(), systemone=MockSystemOne())
     h.cfg.workdir = str(tmp_path)
@@ -235,7 +235,7 @@ def test_phase3_backstop_keeps_longterm(tmp_path):
 
 def test_evict_threshold_config():
     """systemone_evict_threshold should be configurable."""
-    from clm_mem.config import HarnessConfig
+    from shatterling.engine.config import HarnessConfig
 
     cfg = HarnessConfig(systemone_evict_threshold=0.9)
     assert cfg.systemone_evict_threshold == 0.9
