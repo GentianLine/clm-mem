@@ -478,7 +478,13 @@ class ProxyHandler(BaseHTTPRequestHandler):
             return self.send_error_json(400, "invalid JSON-RPC body")
         from . import mcp as mcp_mod
 
-        resp = mcp_mod.handle(self.supervisor, msg)
+        hdrs = {}
+        auth = self.headers.get("Authorization")
+        if auth:
+            hdrs["Authorization"] = auth
+
+        api = mcp_mod.HttpApi(self.supervisor.base_url, headers=hdrs)
+        resp = mcp_mod.handle(msg, api)
         if resp is None:  # notification: accepted, no reply body
             self._respond_payload(202, b"", "application/json")
             return
@@ -1143,6 +1149,7 @@ class ProxyHandler(BaseHTTPRequestHandler):
                         "session_id": sid,
                         "ok": res.ok,
                         "summary": res.summary,
+                        "detail": res.detail,
                         "hits": res.data.get("hits", []),
                         "error": res.error,
                     }

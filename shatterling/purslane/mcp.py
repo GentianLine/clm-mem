@@ -1,28 +1,142 @@
-"""MCP (Model Context Protocol) server embedded in `clm-mem serve`.
+"""MCP endpoint logic implemented as a thin HTTP client of `/v1/clm/*`.
 
-Implements the streamable-HTTP transport subset that matters for tool
-clients: JSON-RPC over POST /mcp with ``initialize``, ``tools/list`` and
-``tools/call``. The exposed tools mirror exactly what the web studio and
-``clm-mem chat`` can do -- they all drive the same in-process library, so an
-MCP client (Unsloth Studio's integrations panel, Claude/Cline-style agents)
-gets identical long/short-term memory per workspace sandbox.
+Implements the streamable-HTTP transport subset that matters for tool clients:
+JSON-RPC over POST /mcp answering ``initialize``, ``tools/list`` and
+``tools/call``. The exposed tools mirror exactly what the web studio and CLI
+can do -- but per split-plan decision D6 every capability executes by hitting
+the very same REST verbs any other client uses, through a :class:`HttpApi`,
+instead of being handed the live ``Supervisor`` object.
+Consequences:
+
+* parity tests covering ``/v1/clm/*`` cover this module for free;
+* it works against *remote* daemons (construct :class:`HttpApi` with any base
+  URL plus an Authorization header if one is required);
+* when served by purslane itself at /mcp, calls loop back over HTTP and are
+  answered on their own threads -- both paths run identical code.
+
+This module imports nothing else from shatterling: the layering stays honest.
+The wire identity ``name`` remains "clm-mem" (stable across the rename).
 """
 
 from __future__ import annotations
 import json
+import urllib.error
+import urllib.request
 from typing import Any, Dict, List, Optional
-
-from .server import VERSION as SERVER_VERSION
-from ..tools import ToolCall
+from urllib.parse import quote
 
 PROTOCOL_VERSION = "2025-06-18"
-SERVER_INFO = {
-    "name": "clm-mem",
-    "title": "clm-mem memory harness",
-    "version": SERVER_VERSION,
-}
+SERVER_NAME = "clm-mem"  # wire identity: stable across the shatterling rename
+SERVER_TITLE = "clm-mem memory harness"
+_TIMEOUT = 60.0
 
 _WS_DEFAULT = "default"
+
+
+class ApiError(Exception):
+    """A daemon call answered non-2xx; carries the server's message through."""
+
+    def __init__(self, status: int, msg: str):
+        super().__init__(msg)
+        self.status = status
+        self.msg = msg
+
+
+def _err_msg(payload: Dict[str, Any]) -> str:
+    err = payload.get("error") if isinstance(payload, dict) else None
+    if isinstance(err, dict):
+        return str(err.get("message", "")) or json.dumps(err)
+    return str(payload)
+
+
+def _parse(raw: bytes | str) -> Dict[str, Any]:
+    text = raw.decode(errors="replace") if isinstance(raw, bytes) else raw
+    try:
+        out = json.loads(text) if text.strip() else {}
+    except Exception:
+        return {"_raw": text}
+    return out if isinstance(out, dict) else {"_json": out}
+
+
+class HttpApi:
+    """Minimal JSON-over-HTTP client for one purslane daemon root URL.
+
+    :param base_url: e.g. ``http://127.0.0.1:8080`` (no path suffix).
+    :param headers: optional extra request headers -- typically an
+        ``Authorization`` value copied from the inbound MCP call so a guarded
+        daemon stays honest on both hops.
+
+    Legacy ``X-Cllm-Mem-*`` spellings are never forwarded; they belong to an
+    expired contract and would earn their 410 over here too.
+    """
+
+    def __init__(
+        self, base_url: str = "", headers: Optional[Dict[str, str]] = None
+    ):
+        self.base = (base_url or "").rstrip("/")
+        self.headers = {
+            k: v
+            for k, v in dict(headers or {}).items()
+            if not k.lower().startswith(("x-cllm-mem", "content-type"))
+        }
+        self._version: Optional[str] = None
+
+    def version(self) -> str:
+        """Daemon-reported build version (``GET /version``, cached per api)."""
+        if self._version is None:
+            try:
+                _, payload = self.request("GET", "/version")
+                v = payload.get("version") or payload.get("_raw")
+                self._version = str(v) if v else "unknown"
+            except Exception:
+                self._version = "unknown"
+        return self._version
+
+    def request(
+        self,
+        method: str = "GET",
+        path: str = "/",
+        body: Optional[Dict[str, Any]] = None,
+    ) -> tuple[int, Dict[str, Any]]:
+        url = f"{self.base}{path}"
+        data = json.dumps(body).encode() if isinstance(body, dict) else (
+            b"{}" if method.upper() != "GET" else None
+        )
+        req = urllib.request.Request(
+            url,
+            data=data,
+            headers=dict(self.headers),
+            method=method.upper(),
+        )
+        req.add_header("Content-Type", "application/json")
+        try:
+            with urllib.request.urlopen(req, timeout=_TIMEOUT) as r:  # daemon
+                raw = (r.read() or b"")
+                status = int(r.status)
+        except urllib.error.HTTPError as exc:  # non-2xx still carries a JSON body
+            try:
+                raw = exc.read() or b""
+            except Exception:
+                raw = b"{}"
+            status = int(exc.code)
+        return (status or 0), _parse(raw)
+
+    def ok(
+        self,
+        method: str = "GET",
+        path: str = "/v1/clm/workspaces",
+        body: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """:meth:`request` that raises :class:`ApiError` on non-2xx."""
+        status, payload = self.request(method, path, body)
+        if not 200 <= status < 300:
+            raise ApiError(status, _err_msg(payload))
+        return payload
+
+    def ensure_open(self, sid: str) -> None:
+        """Mirror the old ``harness_for`` lazy-create through the open verb."""
+        self.ok("POST", "/v1/clm/sessions", {"session": sid})
+
 
 
 def _sid(args: Dict[str, Any]) -> str:
@@ -254,72 +368,101 @@ def _text(msg: str, is_error: bool = False) -> Dict:
     return {"content": [{"type": "text", "text": msg}], "isError": is_error}
 
 
-def _agent_result(sup, sid: str, name: str, args: Dict[str, Any]) -> Dict:
-    """MCP handlers for the agent surface (same library as the web studio)."""
-    h = sup.harness_for(sid)
+def _err(rid, code: int, msg: str) -> Dict:
+    return {"jsonrpc": "2.0", "id": rid, "error": {"code": code, "message": msg}}
+
+
+def _exec_text(payload: Dict[str, Any]) -> str:
+    summary = str(payload.get("summary", "") or "")
+    detail = str(payload.get("detail", "") or "")[:4000]
+    return f"{summary}\n{detail}".strip()
+
+
+def _call(
+    api: HttpApi,
+    method: str,
+    path: str,
+    body: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    status, payload = api.request(method, path, body)
+    if not 200 <= status < 300:
+        raise ApiError(status, _err_msg(payload))
+    return payload
+
+
+def _strip_extra(payload: Dict[str, Any]) -> Dict[str, Any]:
+    drop = ("session_id", "backend_ctx")
+    out = dict(payload)
+    for k in drop:
+        out.pop(k, None)
+    return out
+
+
+def _agent_result(api: HttpApi, sid: str, name: str, args: Dict[str, Any]) -> Dict:
+    ep = f"/v1/clm/sessions/{quote(sid)}"
     if name == "clm_tools":
         tail = int(args.get("activity", 10) or 10)
-        return _text(
-            json.dumps(
-                {
-                    **h.tools.state(),
-                    "tools": h.tools.describe(),
-                    "activity": h.tools.activity(limit=tail),
-                }
-            )
-        )
+        state = api.ok("GET", ep + "/tools")
+        act = api.ok("GET", f"{ep}/activity?limit={tail}")
+        merged: Dict[str, Any] = {}
+        for k, v in state.items():
+            if k != "session_id":
+                merged[k] = v
+        merged["activity"] = act.get("activity", [])
+        return _text(json.dumps(merged))
     if name == "clm_tool_on":
         if args.get("approval_mode"):
-            h.tools.set_policy(str(args["approval_mode"]))
-        on = args.get("on")
-        out = h.tools.toggle(
-            str(args.get("target", "all")), None if on is None else bool(on)
+            api.request(
+                "POST",
+                ep + "/tools",
+                {"approval_mode": str(args["approval_mode"])},
+            )  # old code ignored this result too
+        st, p = api.request(
+            "POST",
+            ep + "/tools",
+            {
+                "target": str(args.get("target", "all")),
+                "on": args.get("on"),
+            },
         )
+        if not 200 <= st < 300:
+            raise ApiError(st, _err_msg(p))
+        out = {k: v for k, v in p.items() if k != "session_id" and k != "changed"}
         return _text(json.dumps(out))
     if name == "clm_tool_call":
-        call = ToolCall(
-            id="mcp-call",
-            name=str(args.get("tool", "")).strip(),
-            args=dict(args.get("args") or {}),
-            origin="mcp",
-        )
-        res = h.tools.execute(call)
-        return _text(f"{res.summary}\n{res.detail[:4000]}".strip(), is_error=not res.ok)
+        body: Dict[str, Any] = {
+            "tool": str(args.get("tool", "")).strip(),
+            "args": dict(args.get("args") or {}),
+            "origin": "mcp",
+        }
+        p = _call(api, "POST", ep + "/toolcall", body)
+        return _text(_exec_text(p), is_error=not bool(p.get("ok")))
     if name == "clm_sandbox_exec":
-        call = ToolCall(
-            id="mcp-exec",
-            name="run_command",
-            args={
-                "command": str(args.get("command", "")).strip(),
-                "cwd": str(args.get("cwd", "")),
-                "timeout": args.get("timeout"),
-            },
-            origin="user",
-        )  # human-initiated: never asks
-        res = h.tools.execute(call)
-        return _text(f"{res.summary}\n{res.detail[:4000]}".strip(), is_error=not res.ok)
+        body = {
+            "command": str(args.get("command", "")).strip(),
+            "cwd": str(args.get("cwd", "")),
+            "timeout": args.get("timeout"),
+        }
+        p = _call(api, "POST", ep + "/sandbox/exec", body)
+        return _text(_exec_text(p), is_error=not bool(p.get("ok")))
     if name == "clm_web_search":
-        call = ToolCall(
-            id="mcp-web",
-            name="web_search",
-            args={
-                "query": str(args.get("query", "")).strip(),
-                "max_results": int(args.get("max_results", 5)),
-            },
-            origin="user",
-        )
-        res = h.tools.execute(call)
-        return _text(f"{res.summary}\n{res.detail[:4000]}".strip(), is_error=not res.ok)
+        body = {
+            "query": str(args.get("query", "")).strip(),
+            "max_results": int(args.get("max_results", 5)),
+        }
+        p = _call(api, "POST", ep + "/search", body)
+        return _text(_exec_text(p), is_error=not bool(p.get("ok")))
     return _text(f"unknown agent tool {name!r}", is_error=True)
 
 
-def _tool_result(sup, name: str, args: Dict[str, Any]) -> Dict:
+def _tool_result(api: HttpApi, name: str, args: Dict[str, Any]) -> Dict:
     try:
         if name == "clm_workspaces":
-            return _text(json.dumps({"workspaces": sup.list_workspaces()}))
+            payload = api.ok("GET", "/v1/clm/workspaces")
+            return _text(json.dumps(payload))
 
         sid = _sid(args)
-        # -- agent tools -------------------------------------------------
+        ep = f"/v1/clm/sessions/{quote(sid)}"
         if name in (
             "clm_tools",
             "clm_tool_on",
@@ -327,110 +470,137 @@ def _tool_result(sup, name: str, args: Dict[str, Any]) -> Dict:
             "clm_sandbox_exec",
             "clm_web_search",
         ):
-            return _agent_result(sup, sid, name, args)
+            return _agent_result(api, sid, name, args)
+
         if name == "clm_open_session":
-            opts = args.get("options") or {}
-            fresh: List[bool] = []
-            try:
-                h = sup.harness_for(
-                    sid,
-                    str(args.get("model", "")),
-                    overrides=opts,
-                    created_out=fresh,
-                )
-            except ValueError as exc:
-                return _text(f"cannot open session: {exc}", is_error=True)
-            created = bool(fresh) and fresh[0]
-            return _text(
-                json.dumps(
-                    {
-                        "session_id": sid,
-                        "created": bool(created),
-                        "budget": h.cfg.max_context_tokens,
-                        "status": h.status(),
-                    }
-                )
-            )
+            opts = dict(args.get("options") or {})
+            body: Dict[str, Any] = {
+                "session": sid,
+                "model": str(args.get("model", "")),
+                "options": opts,
+            }
+            st, p = api.request("POST", "/v1/clm/sessions", body)
+            if not 200 <= st < 300:
+                return _text(_err_msg(p), is_error=True)
+            filtered: Dict[str, Any] = {}
+            for k in ("session_id", "created", "budget", "status"):
+                if k in p:
+                    filtered[k] = p[k]
+            return _text(json.dumps(filtered))
+
+        # The old code used ``harness_for`` lazy-create; mirror it via the open verb.
+        api.ensure_open(sid)
+
         if name == "clm_chat":
-            h = sup.harness_for(sid)
-            out = h.step(str(args.get("message", "")), since_event_seq=None)
-            reply = out["reply"] if isinstance(out, dict) else out
-            return _text(f"{reply}\n\n[context: {h.status()}]")
+            st, p = api.request(
+                "POST",
+                ep + "/turns",
+                {"content": str(args.get("message", ""))},
+            )
+            if not 200 <= st < 300:
+                return _text(_err_msg(p), is_error=True)
+            choices = p.get("choices") or [{}]
+            reply = (choices[0].get("message") or {}).get("content", "")
+            clm_mem = p.get("clm_mem") or {}
+            status = str(clm_mem.get("status", ""))
+            return _text(f"{reply}\n\n[context: {status}]")
         if name == "clm_status":
-            h = sup.harness_for(sid)
-            return _text(json.dumps(h.snapshot(preview_chars=0, events_tail=5)))
+            snap = api.ok("GET", ep + "/snapshot")
+            return _text(json.dumps(_strip_extra(snap)))
         if name == "clm_blocks":
-            h = sup.harness_for(sid)
-            snap = h.snapshot(include_full=bool(args.get("full")))
+            fullq = "1" if bool(args.get("full")) else "0"
+            st, snap = api.request(
+                "GET", ep + f"/snapshot?full={fullq}"
+            )  # ensure_open already guarantees presence
+            if not 200 <= st < 300:
+                return _text(_err_msg(snap), is_error=True)
+            snap = _strip_extra(snap)
             tag = args.get("tag")
             if tag:
-                snap["blocks"] = [b for b in snap["blocks"] if b["tag"] == tag]
+                snap["blocks"] = [b for b in snap.get("blocks", []) if b.get("tag") == tag]
             return _text(json.dumps(snap))
         if name == "clm_recall":
-            h = sup.harness_for(sid)
-            hits = h.recall(
-                str(args.get("query", "")), limit=int(args.get("limit", 50))
-            )
-            return _text(json.dumps({"hits": hits}))
+            q = quote(str(args.get("query", "")))
+            limit = int(args.get("limit", 50))
+            p = api.ok("GET", f"{ep}/archive?q={q}&limit={limit}")
+            return _text(json.dumps({"hits": p.get("hits")}))
         if name == "clm_reinject":
-            h = sup.harness_for(sid)
-            ok = h.reinject(int(args.get("block_id", -1)))
-            return _text(
-                ("re-injected as shortterm" if ok else "block id not in archive"),
-                is_error=not ok,
+            st, p = api.request(
+                "POST",
+                ep + "/reinject",
+                {"block_id": int(args.get("block_id", -1))},
             )
+            if 200 <= st < 300 and p.get("reinstated"):
+                return _text("re-injected as shortterm")
+            return _text(_err_msg(p), is_error=True)
         if name == "clm_set_forget":
-            h = sup.harness_for(sid)
-            out = []
-            if "decay" in args:
-                h.cfg.decay_enabled = bool(args["decay"])
-                out.append(f"decay_enabled={h.cfg.decay_enabled}")
-            if "supersede" in args:
-                h.cfg.supersede_enabled = bool(args["supersede"])
-                out.append(f"supersede_enabled={h.cfg.supersede_enabled}")
-            if "reheat_scope" in args:
-                scope = str(args["reheat_scope"]).lower()
+            out: List[str] = []
+            body2: Dict[str, Any] = {}
+            if args.get("decay") is not None:
+                val = bool(args["decay"])
+                body2["decay_enabled"] = val
+                out.append(f"decay_enabled={val}")
+            if args.get("supersede") is not None:
+                val = bool(args["supersede"])
+                body2["supersede_enabled"] = val
+                out.append(f"supersede_enabled={val}")
+            scope_raw = args.get("reheat_scope")
+            if scope_raw is not None:
+                scope = str(scope_raw).lower()
                 if scope not in ("global", "chat", "fresh"):
                     return _text(
                         "reheat_scope must be 'global', 'chat' or 'fresh'",
                         is_error=True,
                     )
-                h.cfg.reheat_scope = scope
-                out.append(f"reheat_scope={h.cfg.reheat_scope}")
-            return _text(
-                "; ".join(out)
-                or f"decay_enabled={h.cfg.decay_enabled} "
-                f"supersede_enabled={h.cfg.supersede_enabled}"
-            )
+                body2["reheat_scope"] = scope
+                out.append(f"reheat_scope={scope}")
+            if not body2:
+                # omitted flags read back current state (old cfg introspection)
+                snap = api.ok("GET", ep + "/snapshot")
+                return _text(
+                    f"decay_enabled={snap.get('decay_enabled')} "
+                    f"supersede_enabled={snap.get('supersede_enabled')}"
+                )
+            st, p = api.request("POST", ep + "/settings", body2)
+            if not 200 <= st < 300:
+                return _text(_err_msg(p), is_error=True)
+            return _text("; ".join(out))
         if name == "clm_set_keep_pct":
-            pct = float(args.get("pct", -1))
+            try:
+                pct = float(args.get("pct", -1.0))
+            except (TypeError, ValueError):
+                return _text("pct must be in [0, 1)", is_error=True)   
             if not 0.0 <= pct < 1.0:
                 return _text("pct must be in [0, 1)", is_error=True)
-            h = sup.harness_for(sid)
-            h.cfg.shortterm_keep_pct = pct
+            st, p = api.request(
+                "POST", ep + "/settings", {"shortterm_keep_pct": pct}
+            )
+            if not 200 <= st < 300:
+                return _text(_err_msg(p), is_error=True)
             return _text(f"shortterm_keep_pct = {pct}")
         return _text(f"unknown tool {name!r}", is_error=True)
     except Exception as exc:  # MCP tools report failures via isError
         return _text(f"{name} failed: {exc}", is_error=True)
 
 
-def _err(rid, code: int, msg: str) -> Dict:
-    return {"jsonrpc": "2.0", "id": rid, "error": {"code": code, "message": msg}}
-
-
-def handle(sup, msg: Dict[str, Any]) -> Optional[Dict]:
-    """Handle one JSON-RPC message; None means 'notification accepted'."""
+def handle(msg: Dict[str, Any], api: HttpApi) -> Optional[Dict]:
+    """Handle one JSON-RPC message against daemon `api`; None means accepted."""
     rid = msg.get("id")
     method = str(msg.get("method", ""))
 
     if method == "initialize":
+        server_info: Dict[str, Any] = {
+            "name": SERVER_NAME,
+            "title": SERVER_TITLE,
+            "version": api.version(),
+        }
         return {
             "jsonrpc": "2.0",
             "id": rid,
             "result": {
                 "protocolVersion": PROTOCOL_VERSION,
                 "capabilities": {"tools": {}},
-                "serverInfo": SERVER_INFO,
+                "serverInfo": server_info,
             },
         }
     if method in ("notifications/initialized", "initialized"):
@@ -442,11 +612,11 @@ def handle(sup, msg: Dict[str, Any]) -> Optional[Dict]:
     if method == "tools/call":
         params = msg.get("params") or {}
         name = str(params.get("name", ""))
-        args = params.get("arguments") or {}
+        args: Dict[str, Any] = dict(params.get("arguments") or {})
         known = {t["name"] for t in TOOLS}
         if name not in known:
             return _err(rid, -32602, f"unknown tool {name!r}")
-        result = _tool_result(sup, name, args)
+        result = _tool_result(api, name, args)
         return {"jsonrpc": "2.0", "id": rid, "result": result}
     if method.startswith("notifications/"):
         return None
