@@ -1,7 +1,5 @@
 name: Test and Lint
 
-events: [push, pull_request]
-
 on:
   push:
     branches: [ "main" ]
