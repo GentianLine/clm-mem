@@ -103,15 +103,17 @@ def test_native_props_passthrough(sup):
 
 
 def test_options_cors(sup):
+    """OPTIONS preflight returns 204. Default CORS is same-origin only:
+    without an Origin header (non-browser) no ACAO/ACAH headers are sent.
+    See tests/test_security.py for full CORS policy coverage."""
     req = urllib.request.Request(
         f"{sup.base_url}/v1/chat/completions", method="OPTIONS"
     )
     resp = urllib.request.urlopen(req, timeout=30)
     assert resp.status == 204
-    allow = resp.headers.get("Access-Control-Allow-Headers") or ""
-    assert "Content-Type" in allow
-    # the retired header spellings are not offered anymore
-    assert "X-Cllm-Mem-Session" not in allow
+    # default: same-origin only -- no ACAO for requests without Origin
+    acao = resp.headers.get("Access-Control-Allow-Origin")
+    assert acao is None
 
 
 def _open_branch(sup, sid, **opts):

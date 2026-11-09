@@ -29,6 +29,7 @@ import json
 import os
 import re
 import shutil
+import sys
 import threading
 import time
 import urllib.error
@@ -42,6 +43,7 @@ from ..engine.harness import MemoryHarness
 from ..engine.llm import OpenAIChat
 from ..tools import ToolCall
 from .processes import ProcessManager, free_port, render_flags
+from .security import SecurityConfig
 
 VERSION = "0.3.0"
 #: Legacy header spellings are NOT accepted: sending them is a 410 with a
@@ -243,6 +245,7 @@ class ProxyConfig:
     request_timeout: float = 300.0
     ui_enabled: bool = True  # serve the bundled web studio at /
     backend_ctx: Optional[int] = None  # live llama.cpp window (from /props)
+    security: SecurityConfig = field(default_factory=SecurityConfig)
 
 
 class ProxyHandler(BaseHTTPRequestHandler):
@@ -262,12 +265,45 @@ class ProxyHandler(BaseHTTPRequestHandler):
         return self.server.supervisor  # type: ignore[attr-defined]
 
     def _cors(self):
-        self.send_header("Access-Control-Allow-Origin", "*")
-        self.send_header(
-            "Access-Control-Allow-Headers",
-            "Content-Type, Authorization, X-Cllm-Mem-Legacy-Session-Detect",
+        """Send CORS headers per the security config.
+
+        Default (no cors_origins): same-origin only -- no ACAO header is sent,
+        so browsers block cross-origin reads. When origins are configured, the
+        matching origin is echoed back."""
+        sec = self.supervisor.config.security
+        origin = self.headers.get("Origin")
+        allowed = sec.cors_allowed_origin(origin)
+        if allowed:
+            self.send_header("Access-Control-Allow-Origin", allowed)
+            if sec.cors_allow_credentials():
+                self.send_header("Access-Control-Allow-Credentials", "true")
+            self.send_header(
+                "Access-Control-Allow-Headers",
+                "Content-Type, Authorization, X-Cllm-Mem-Legacy-Session-Detect",
+            )
+            self.send_header("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
+
+    def _auth_check(self) -> bool:
+        """Return True if the request is authorized (or auth is disabled).
+
+        Sends a 401 JSON response and returns False when rejected.
+        Exempt paths (health, static assets) always pass.
+        """
+        sec = self.supervisor.config.security
+        path = unquote(self.path.split("?")[0])
+        if not sec.is_auth_enabled():
+            return True
+        if sec.is_exempt(path):
+            return True
+        auth_header = self.headers.get("Authorization")
+        if sec.check_auth(auth_header):
+            return True
+        self.send_error_json(
+            401,
+            "authentication required: send 'Authorization: Bearer <api-key>' "
+            "(set --api-key on the server or CLM_MEM_API_KEY env var)",
         )
-        self.send_header("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
+        return False
 
     def send_json(self, obj, status: int = 200):
         payload = json.dumps(obj).encode()
@@ -430,6 +466,8 @@ class ProxyHandler(BaseHTTPRequestHandler):
 
     # -- methods -------------------------------------------------------------
     def do_OPTIONS(self):
+        # CORS preflight: always answer 204 (browsers need this before
+        # sending the real request). Auth is checked on the actual request.
         self.send_response(204)
         self._cors()
         self.end_headers()
@@ -494,7 +532,11 @@ class ProxyHandler(BaseHTTPRequestHandler):
         sup = self.supervisor
         cfg = sup.config
         path = unquote(self.path.split("?")[0])
+        # static assets are served before auth (the studio shell loads first;
+        # its JS then authenticates API calls via the stored key)
         if self._static_route(path):
+            return
+        if not self._auth_check():
             return
         if path in ("/health", "/v1/health"):
             with sup.lock:
@@ -565,6 +607,8 @@ class ProxyHandler(BaseHTTPRequestHandler):
     def do_DELETE(self):
         sup = self.supervisor
         path = unquote(self.path.split("?")[0])
+        if not self._auth_check():
+            return
         if path.startswith("/v1/clm/sessions/"):
             parts = [p for p in unquote(path).split("/") if p]
             sid = parts[3] if len(parts) > 3 else ""
@@ -598,6 +642,8 @@ class ProxyHandler(BaseHTTPRequestHandler):
         sup = self.supervisor
         cfg = sup.config
         path = unquote(self.path.split("?")[0])
+        if not self._auth_check():
+            return
         if path == "/v1/chat/completions":
             return self._chat_completions()
         if path in ("/mcp", "/v1/mcp"):
@@ -1578,6 +1624,8 @@ def start_supervisor(
     log_dir: Optional[str] = None,
     timeout: float = 90.0,
     ui: bool = True,
+    api_key: str = "",
+    cors_origins: tuple = (),
 ) -> Supervisor:
     """Bring up the whole stack and return a running :class:`Supervisor`.
 
@@ -1684,6 +1732,16 @@ def start_supervisor(
             backend_ctx or HarnessConfig().max_context_tokens
         )
 
+    # Build security config: explicit args override env vars
+    if api_key or cors_origins:
+        sec = SecurityConfig(
+            api_key=api_key,
+            cors_origins=tuple(cors_origins) if cors_origins else (),
+            bind_host=public_host,
+        )
+    else:
+        sec = SecurityConfig.from_env(bind_host=public_host)
+
     config = ProxyConfig(
         backend_root=backend_root,
         backend_api_key=backend_api_key,
@@ -1696,6 +1754,7 @@ def start_supervisor(
         chat_temperature=chat_temperature,
         chat_max_tokens=chat_max_tokens,
         ui_enabled=bool(ui),
+        security=sec,
     )
 
     try:
@@ -1706,6 +1765,11 @@ def start_supervisor(
     server.daemon_threads = True
     sup = Supervisor(server, manager, config)
     server.supervisor = sup  # type: ignore[attr-defined]
+
+    # Emit security warnings at startup (visible in the serve banner)
+    for w in sec.startup_warnings(ui_enabled=bool(ui)):
+        print(f"\u26a0 {w}", file=sys.stderr, flush=True)
+
     try:
         sup.start()
     except Exception:

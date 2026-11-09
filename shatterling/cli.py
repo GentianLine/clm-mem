@@ -733,6 +733,7 @@ def cmd_chat(a: argparse.Namespace) -> None:
             a.connect,
             session=getattr(a, "session", "") or None,
             workspace=getattr(a, "workspace", "") or None,
+            api_key=getattr(a, "api_key", None),
         )
         try:
             status = h.status()
@@ -976,6 +977,24 @@ def _add_serve_flags(sub: argparse.ArgumentParser) -> None:
         action="store_false",
         help="do not host the bundled web studio at the root URL",
     )
+    # --- security ----------------------------------------------------------
+    sub.add_argument(
+        "--api-key",
+        default="",
+        help="bearer token required on all /v1/* and /mcp routes. "
+        "Clients send 'Authorization: Bearer <key>'. When unset, "
+        "falls back to $CLM_MEM_API_KEY env var. Generate one with: "
+        "python -c \"import secrets; print(secrets.token_urlsafe(32))\"",
+    )
+    sub.add_argument(
+        "--cors-origins",
+        default="",
+        help="comma-separated list of allowed CORS origins, e.g. "
+        "'https://studio.example.com,http://localhost:3000'. "
+        "Default (empty): same-origin only -- no cross-origin requests "
+        "are answered. Use '*' to allow all (NOT recommended without "
+        "--api-key). Falls back to $CLM_MEM_CORS_ORIGINS env var.",
+    )
     _add_harness_flags(sub)
 
 
@@ -1033,6 +1052,11 @@ def cmd_serve(a: argparse.Namespace) -> None:
     else:
         sys_mode = "none"
 
+    # Parse CORS origins
+    cors_origins = tuple(
+        o.strip() for o in a.cors_origins.split(",") if o.strip()
+    ) if a.cors_origins else ()
+
     sup = start_supervisor(
         public_host=a.public_host,
         public_port=a.public_port,
@@ -1051,6 +1075,8 @@ def cmd_serve(a: argparse.Namespace) -> None:
         chat_max_tokens=a.max_tokens,
         log_dir=a.log_dir or None,
         ui=a.ui,
+        api_key=a.api_key,
+        cors_origins=cors_origins,
     )
 
     procs = {h.name: f"{h.host}:{h.port}" for h in sup.manager.handles if h.alive()}
@@ -1082,6 +1108,18 @@ def cmd_serve(a: argparse.Namespace) -> None:
             f"(llama.cpp window: {sup.config.backend_ctx or 'unknown'})"
         )
         print(f"  systemone api    : {sup.config.systemone_endpoint or '(none)'}")
+        # security status
+        sec = sup.config.security
+        if sec.is_auth_enabled():
+            key_display = sec.api_key[:4] + "…" + sec.api_key[-4:] if len(sec.api_key) > 8 else "***"
+            print(f"  api auth         : ENABLED (key: {key_display})")
+        else:
+            print("  api auth         : disabled (no --api-key set)")
+        if sec.cors_origins:
+            origins_str = ", ".join(sec.cors_origins) if len(sec.cors_origins) <= 3 else f"{len(sec.cors_origins)} origins"
+            print(f"  cors             : {origins_str}")
+        else:
+            print("  cors             : same-origin only (default)")
         if sup.ui_url:
             print(f"  web studio       : {sup.ui_url}  (MCP tools: {sup.base_url}/mcp)")
         if hk.get("tools_enabled"):

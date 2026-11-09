@@ -77,7 +77,7 @@ class RemoteHarness:
         # base_url: the OpenAI-style public base, e.g. http://127.0.0.1:8080/v1
         self.base_url = base_url.rstrip("/")
         self.session = session
-        self.api_key = api_key
+        self.api_key = api_key  # server-side auth key (not backend LLM key)
         root = (
             self.base_url[: -len("/v1")]
             if self.base_url.endswith("/v1")
@@ -97,6 +97,9 @@ class RemoteHarness:
     ):
         data = json.dumps(body).encode() if body is not None else None
         headers = {"Content-Type": "application/json", **(extra_headers or {})}
+        # Attach the server-side API key for authentication (when set)
+        if self.api_key and self.api_key != "EMPTY":
+            headers.setdefault("Authorization", f"Bearer {self.api_key}")
         req = urllib.request.Request(
             f"{self.root}{path}", data=data, method=method, headers=headers
         )
@@ -105,7 +108,14 @@ class RemoteHarness:
                 raw = r.read()
                 return json.loads(raw.decode()) if raw else {}
         except urllib.error.HTTPError as e:
-            raise RuntimeError(f"{e.code}: {e.read().decode()[:200]}") from e
+            err_body = e.read().decode()[:200]
+            if e.code == 401:
+                raise RuntimeError(
+                    f"401: authentication failed -- the server requires an API key. "
+                    f"Pass api_key= to connect() or set CLM_MEM_API_KEY. "
+                    f"Server said: {err_body}"
+                ) from e
+            raise RuntimeError(f"{e.code}: {err_body}") from e
 
     @property
     def _snap_path(self) -> str:
@@ -315,9 +325,29 @@ class RemoteHarness:
 
 
 def connect(
-    base_url: str, session: Optional[str] = None, workspace: Optional[str] = None
+    base_url: str,
+    session: Optional[str] = None,
+    workspace: Optional[str] = None,
+    api_key: Optional[str] = None,
 ) -> RemoteHarness:
-    """Build a RemoteHarness; workspace sets a ws:<name> session."""
+    """Build a RemoteHarness; workspace sets a ws:<name> session.
+
+    Parameters
+    ----------
+    base_url : str
+        The OpenAI-style public base, e.g. ``http://127.0.0.1:8080/v1``.
+    session : str, optional
+        Explicit session id (e.g. ``ws:myproject``).
+    workspace : str, optional
+        Workspace name; the session becomes ``ws:<workspace>``.
+    api_key : str, optional
+        Bearer token for server-side authentication. Falls back to the
+        ``CLM_MEM_API_KEY`` environment variable when not given.
+    """
+    import os
+
     if session is None:
         session = f"ws:{workspace}" if workspace else "ws:cli"
-    return RemoteHarness(base_url, session=session)
+    if api_key is None:
+        api_key = os.environ.get("CLM_MEM_API_KEY", "EMPTY")
+    return RemoteHarness(base_url, session=session, api_key=api_key)

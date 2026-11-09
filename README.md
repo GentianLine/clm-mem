@@ -217,6 +217,96 @@ routes `/v1/clm/sessions`, `/v1/clm/sessions/<id>/status`, `.../reset`, and
 Session ids are branch ids: `ws:<name>`. Percent-encode the colon in URL
 paths (`ws%3Aname`) or leave it bare -- both spellings route identically.
 
+## Security
+
+### Defaults (secure-by-default)
+
+| Setting | Default | Rationale |
+|---------|---------|----------|
+| Bind address | `127.0.0.1` | Local-only; not reachable from the network |
+| CORS | Same-origin only | No `Access-Control-Allow-Origin` header for cross-origin requests, preventing CSRF from arbitrary web pages |
+| API auth | Disabled (on loopback) | Safe when bound to localhost; warned when non-loopback |
+
+### API key authentication
+
+Enable bearer-token auth on all `/v1/*` and `/mcp` routes:
+
+```bash
+# Generate a key
+python -c "import secrets; print(secrets.token_urlsafe(32))"
+
+# Start with auth
+clm-mem serve --use-mock --api-key YOUR_KEY_HERE
+
+# Or via environment variable
+export CLM_MEM_API_KEY=YOUR_KEY_HERE
+clm-mem serve --use-mock
+```
+
+Clients send the key as a standard Bearer header:
+
+```bash
+curl -H "Authorization: Bearer YOUR_KEY" http://127.0.0.1:8080/v1/clm/sessions
+```
+
+**Exempt paths** (always accessible without auth): `/health`, `/v1/health`,
+`/version`, and static assets (the web studio shell). This lets monitoring
+probes and the browser load the UI before the JS authenticates API calls.
+
+### CORS policy
+
+By default, **no cross-origin requests are answered** -- the server sends no
+`Access-Control-Allow-Origin` header for foreign origins, so browsers block
+any cross-site reads. This prevents CSRF attacks when auth is disabled.
+
+To allow specific origins (e.g., a remote studio or dashboard):
+
+```bash
+clm-mem serve --use-mock \
+  --api-key YOUR_KEY \
+  --cors-origins "https://studio.example.com,http://localhost:3000"
+```
+
+Or via environment: `CLM_MEM_CORS_ORIGINS=https://studio.example.com`
+
+> **Warning:** `--cors-origins '*'` combined with no API key allows any
+> website in a user's browser to make requests to your server. The server
+> prints a prominent startup warning for this combination.
+
+### Startup warnings
+
+The server prints warnings to stderr when it detects dangerous configurations:
+
+- Bound to a non-loopback address without an API key
+- CORS set to `*` with no authentication (CSRF risk)
+- Non-loopback bind without auth (LAN exposure)
+
+### Attaching clients (CLI / SDK / tokamak)
+
+The Python SDK and CLI automatically pick up the key from the environment:
+
+```python
+from shatterling.clients.sdk import connect
+
+# Key comes from CLM_MEM_API_KEY env var, or pass explicitly
+h = connect("http://127.0.0.1:8080/v1", workspace="myproject")
+# or
+h = connect("http://127.0.0.1:8080/v1", workspace="myproject", api_key="..." )
+h.step("hello")
+```
+
+CLI:
+```bash
+export CLM_MEM_API_KEY=YOUR_KEY
+clm-mem chat --connect http://127.0.0.1:8080/v1 --workspace myproject
+```
+
+**For tokamak or other projects:** set `CLM_MEM_API_KEY` in the environment
+before starting `clm-mem serve`, and the same variable in any client process.
+No code changes needed -- the SDK reads it automatically. For programmatic
+integration, pass `api_key=` to `connect()` or construct `RemoteHarness`
+directly with the key.
+
 ## Web studio + workspaces + MCP
 
 By default `serve` also hosts a single-page web studio at its root URL
