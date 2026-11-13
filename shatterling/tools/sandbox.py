@@ -148,10 +148,25 @@ class Sandbox:
 
     def info(self) -> Dict[str, object]:
         files, nbytes = self.usage()
+        isolation = self.isolation_label()
+        # Be honest about the real protection level (audit C-2): a process jail
+        # is NOT a security boundary -- it has no network or filesystem
+        # isolation and runs as the server user. Surface that loudly rather than
+        # letting "sandboxed" imply containment.
+        caveat = (
+            ""
+            if self.mode == "docker" and self.docker_ready()
+            else (
+                "process jail only: NOT a security boundary (no network or "
+                "filesystem isolation; runs as the server user). Use "
+                "sandbox_mode=docker for real containment."
+            )
+        )
         return {
             "root": os.path.relpath(self.root) if self.root else "",
             "mode": self.mode,
-            "isolation": self.isolation_label(),
+            "isolation": isolation,
+            "caveat": caveat,
             "docker": self.docker_ready(),
             "files": files,
             "bytes": nbytes,

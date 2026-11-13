@@ -74,6 +74,12 @@ class SecurityConfig:
     api_key: str = ""
     cors_origins: tuple = ()  # empty = same-origin only
     bind_host: str = "127.0.0.1"
+    #: Send Access-Control-Allow-Credentials: true for matched origins.
+    #: Off by default -- this API authenticates with a Bearer header (not
+    #: cookies), so credentialed cross-origin requests are never needed and
+    #: the header is an unnecessary CSRF/credential-leak surface. Set True
+    #: only if a browser client genuinely requires cookie credentials.
+    allow_credentials: bool = False
 
     @classmethod
     def from_env(cls, **overrides) -> "SecurityConfig":
@@ -93,7 +99,21 @@ class SecurityConfig:
             else ()
         )
         bind_host = overrides.pop("bind_host", "127.0.0.1")
-        return cls(api_key=api_key, cors_origins=cors_origins, bind_host=bind_host)
+        allow_creds_raw = overrides.pop(
+            "allow_credentials",
+            os.environ.get("CLM_MEM_CORS_ALLOW_CREDENTIALS", ""),
+        )
+        allow_credentials = (
+            str(allow_creds_raw).strip().lower() in ("1", "true", "yes", "on")
+            if allow_creds_raw is not None
+            else False
+        )
+        return cls(
+            api_key=api_key,
+            cors_origins=cors_origins,
+            bind_host=bind_host,
+            allow_credentials=allow_credentials,
+        )
 
     # -- auth helpers -------------------------------------------------------
 
@@ -151,24 +171,43 @@ class SecurityConfig:
     def cors_allow_credentials(self) -> bool:
         """True when we should send Access-Control-Allow-Credentials: true.
 
-        Only meaningful when cors_origins is specific (not *).
+        Opt-in via the ``cors_allow_credentials`` flag (default False). Never
+        combined with a wildcard origin, and only sent for a specific matched
+        origin -- the dangerous ACAO+credentials combo is otherwise impossible.
         """
+        if not self.allow_credentials:
+            return False
         return bool(self.cors_origins) and "*" not in self.cors_origins
 
     # -- startup warnings ---------------------------------------------------
+
+    def startup_errors(self) -> List[str]:
+        """Fatal configuration problems that should refuse to start.
+
+        A non-loopback bind without an API key exposes the full RCE/file/
+        web-fetch surface to the network with no authentication -- a warning
+        is not a control, so this is an error (see audit C-1).
+        """
+        errors: List[str] = []
+        if not self.is_auth_enabled() and not _is_loopback(self.bind_host):
+            errors.append(
+                f"refusing to bind {self.bind_host} without authentication: "
+                "the proxy exposes sandbox exec, file write/delete and web "
+                "fetch over HTTP. Set --api-key / CLM_MEM_API_KEY to enable "
+                "authentication, or bind to 127.0.0.1 for local-only use."
+            )
+        return errors
 
     def startup_warnings(self, ui_enabled: bool = True) -> List[str]:
         """Return a list of warning strings for the server banner."""
         warnings: List[str] = []
         non_loopback = not _is_loopback(self.bind_host)
 
-        if not self.is_auth_enabled() and non_loopback:
+        if self.is_auth_enabled() and non_loopback:
             warnings.append(
-                "SECURITY: server is bound to a non-loopback address "
-                f"({self.bind_host}) with NO API key. Anyone on the network "
-                "can read/write all sessions, execute sandbox commands, and "
-                "access files. Set --api-key or CLM_MEM_API_KEY to require "
-                "authentication, or bind to 127.0.0.1 for local-only use."
+                f"SECURITY: bound to {self.bind_host} with authentication "
+                "enabled. Serve over TLS (or a TLS-terminating reverse proxy) "
+                "so the Bearer key is not sent in cleartext."
             )
 
         if not self.is_auth_enabled() and self.cors_origins == ("*",):

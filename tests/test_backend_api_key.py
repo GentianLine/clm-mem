@@ -208,7 +208,10 @@ def test_discovery_and_llm_calls_carry_the_key(keyed):
     assert not bad, bad
 
 
-def test_client_credential_is_relayed_when_unset(tmp_path):
+def test_client_credential_is_not_relayed_when_unset(tmp_path):
+    # L-2: when no backend credential is configured, the proxy must NOT relay
+    # whatever Authorization header the client presented upstream (that let a
+    # client smuggle its own token to the backend). The stub should see none.
     root, calls, stop = make_stub(key=None)  # accepts anything, echoes
     sup = start_supervisor(
         public_port=0,
@@ -228,9 +231,10 @@ def test_client_credential_is_relayed_when_unset(tmp_path):
             headers={"Authorization": "Bearer client-abc"},
         )
         assert st == 200, resp
-        assert "auth=Bearer client-abc" in resp["choices"][0]["message"]["content"]
+        # the client's own credential is dropped on the outbound hop
+        assert "auth=(none)" in resp["choices"][0]["message"]["content"]
 
-        # with no credential anywhere, the stub sees nothing at all
+        # with no credential anywhere, the stub still sees nothing at all
         st, resp = http_call(
             sup,
             "/v1/chat/completions",

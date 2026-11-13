@@ -110,6 +110,12 @@ WS_NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9 ._-]{0,63}")
 #: what (turns, activity, approvals, drafts) without splitting the memory.
 CHAT_RE = re.compile(r"chat-(\d{3,})$")
 
+#: Canonical session-id shape enforced at the router edge (audit M-3): either a
+#: workspace branch ``ws:<name>`` or a bare id. One pattern applied in every
+#: handler that accepts a sid; anything else is rejected with 400 before it can
+#: reach path-building code.
+SID_RE = re.compile(r"(?:ws:[A-Za-z0-9][A-Za-z0-9 ._\-]{0,63}|[A-Za-z0-9][A-Za-z0-9._\-]{0,127})$")
+
 
 def chat_slot(chat: str) -> int:
     """Zero-based slot index of a ``chat-001`` style id; -1 when it isn't one."""
@@ -248,6 +254,12 @@ class ProxyConfig:
     security: SecurityConfig = field(default_factory=SecurityConfig)
 
 
+class BodyTooLarge(Exception):
+    """Raised by :meth:`ProxyHandler.read_body_bytes` when a request body
+    exceeds the size cap. The 413 has already been sent; callers must stop.
+    """
+
+
 class ProxyHandler(BaseHTTPRequestHandler):
     """llama.cpp-shaped HTTP surface; ``self.server.supervisor`` carries state."""
 
@@ -319,9 +331,25 @@ class ProxyHandler(BaseHTTPRequestHandler):
             {"error": {"message": msg, "type": "proxy", "code": status}}, status
         )
 
+    #: Hard cap on any inbound request body (audit L-1). A client announcing a
+    #: huge Content-Length must not be able to exhaust memory/CPU while we read.
+    MAX_BODY_BYTES = int(os.environ.get("CLM_MEM_MAX_BODY_BYTES", 32 * 1024 * 1024))
+
     def read_body_bytes(self) -> bytes:
-        length = int(self.headers.get("Content-Length") or 0)
-        return self.rfile.read(length) if length else b""
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+        except (TypeError, ValueError):
+            return b""
+        if length <= 0:
+            return b""
+        if length > self.MAX_BODY_BYTES:
+            self.send_error_json(
+                413,
+                f"request body too large: {length} bytes exceeds the "
+                f"{self.MAX_BODY_BYTES}-byte limit",
+            )
+            raise BodyTooLarge(length)
+        return self.rfile.read(length)
 
     # -- forwarding --------------------------------------------------------
     def _respond_payload(self, status: int, payload: bytes, content_type: str):
@@ -344,16 +372,15 @@ class ProxyHandler(BaseHTTPRequestHandler):
         """Bearer header for backend-bound requests.
 
         ``api_key=None`` uses the configured chat-backend key
-        (--backend-api-key); an explicit value overrides it. With no
-        credential configured on this hop, any Authorization header the
-        client itself presented is relayed instead, so clients may carry
-        their own key through the proxy. llama.cpp-style servers ignore
-        the header, so sending one is always safe."""
+        (--backend-api-key); an explicit value overrides it. When no credential
+        is configured on this hop we send *no* Authorization header: relaying
+        whatever the client presented upstream (the old behaviour) let a client
+        smuggle its own token to the backend (audit L-2). llama.cpp-style
+        servers ignore the header, so omitting it is always safe."""
         if api_key is None:
             api_key = self.supervisor.config.backend_api_key
         if not api_key:
-            incoming = self.headers.get("Authorization") or ""
-            return {"Authorization": incoming} if incoming else {}
+            return {}
         if not api_key.lower().startswith("bearer "):
             api_key = f"Bearer {api_key}"
         return {"Authorization": api_key}
@@ -509,7 +536,10 @@ class ProxyHandler(BaseHTTPRequestHandler):
 
     # -- MCP server endpoint -------------------------------------------------
     def _mcp(self):
-        raw = self.read_body_bytes()
+        try:
+            raw = self.read_body_bytes()
+        except BodyTooLarge:
+            return  # 413 already sent
         try:
             msg = json.loads(raw.decode() or "{}")
         except Exception:
@@ -544,18 +574,33 @@ class ProxyHandler(BaseHTTPRequestHandler):
             backends = {
                 h.name: f"{h.host}:{h.port}" for h in sup.manager.handles if h.alive()
             }
-            self.send_json(
-                {
-                    "status": "ok",
-                    "version": VERSION,
-                    "model": cfg.served_model,
-                    "sessions": sids,
-                    "processes": backends,
-                    "ui": cfg.ui_enabled,
-                    "backend_ctx": cfg.backend_ctx,
-                    "workspace_root": sup.workspace_root,
-                }
-            )
+            # /health is auth-exempt (so load balancers can probe it), but when
+            # auth IS enabled an unauthenticated peer must not be able to
+            # enumerate live session ids or the filesystem layout (audit M-5).
+            # The authenticated caller still gets full detail.
+            if cfg.security.is_auth_enabled():
+                self.send_json(
+                    {
+                        "status": "ok",
+                        "version": VERSION,
+                        "model": cfg.served_model,
+                        "ui": cfg.ui_enabled,
+                        "backend_ctx": cfg.backend_ctx,
+                    }
+                )
+            else:
+                self.send_json(
+                    {
+                        "status": "ok",
+                        "version": VERSION,
+                        "model": cfg.served_model,
+                        "sessions": sids,
+                        "processes": backends,
+                        "ui": cfg.ui_enabled,
+                        "backend_ctx": cfg.backend_ctx,
+                        "workspace_root": sup.workspace_root,
+                    }
+                )
         elif path in ("/mcp", "/v1/mcp"):
             self.send_json(
                 {
@@ -612,6 +657,9 @@ class ProxyHandler(BaseHTTPRequestHandler):
         if path.startswith("/v1/clm/sessions/"):
             parts = [p for p in unquote(path).split("/") if p]
             sid = parts[3] if len(parts) > 3 else ""
+            # canonical session-id check at the router edge (M-3)
+            if not SID_RE.fullmatch(sid):
+                return self.send_error_json(400, f"invalid session id {sid!r}")
             if len(parts) == 6 and parts[5] == "sandbox":
                 h = sup.get_session(sid)
                 if h is None:
@@ -658,7 +706,10 @@ class ProxyHandler(BaseHTTPRequestHandler):
             if not target:
                 self.send_error_json(503, "systemone is not configured")
                 return
-            body = self.read_body_bytes()
+            try:
+                body = self.read_body_bytes()
+            except BodyTooLarge:
+                return  # 413 already sent
             # credential for the decision hop: explicit systemone key (or
             # $FEATHERLESS_API_KEY); fall back to the backend key only when
             # the decision server *is* the chat backend (fork passthrough),
@@ -670,14 +721,20 @@ class ProxyHandler(BaseHTTPRequestHandler):
         if path.startswith("/v1/clm/"):
             return self._clm_post(path)
         if path in NATIVE_POST_PATHS and cfg.backend_root:
-            body = self.read_body_bytes()
+            try:
+                body = self.read_body_bytes()
+            except BodyTooLarge:
+                return  # 413 already sent
             self._forward("POST", f"{cfg.backend_root}{path}", body)
             return
         self.send_error_json(404, f"no route for {path}")
 
     # -- clm-mem introspection / studio API -----------------------------------
     def _read_json_body(self):
-        raw = self.read_body_bytes()
+        try:
+            raw = self.read_body_bytes()
+        except BodyTooLarge:
+            return None  # 413 already sent; stop
         try:
             return json.loads(raw.decode() or "{}")
         except Exception:
@@ -704,6 +761,10 @@ class ProxyHandler(BaseHTTPRequestHandler):
         if "/" in parts[3]:
             sub = [p for p in parts[3].split("/") if p]
             parts = parts[:3] + sub
+        sid = parts[3]
+        # canonical session-id check at the router edge (M-3)
+        if not SID_RE.fullmatch(sid):
+            return self.send_error_json(400, f"invalid session id {sid!r}")
         action = parts[4] if len(parts) > 4 else "snapshot"
         if action == "turns":
             # GET .../turns?chat=<c> -- replay one chat slot's transcript
@@ -799,6 +860,8 @@ class ProxyHandler(BaseHTTPRequestHandler):
         sup = self.supervisor
         parts = [p for p in path.split("/") if p]
         body = self._read_json_body()
+        if body is None:
+            return  # oversized body: 413 already sent by read_body_bytes
         if len(parts) == 3 and parts[2] == "workspaces":
             name = str(body.get("name", "")).strip()
             try:
@@ -874,6 +937,10 @@ class ProxyHandler(BaseHTTPRequestHandler):
         if "/" in parts[3]:
             sub = [p for p in parts[3].split("/") if p]
             parts = parts[:3] + sub
+        sid = parts[3]
+        # canonical session-id check at the router edge (M-3)
+        if not SID_RE.fullmatch(sid):
+            return self.send_error_json(400, f"invalid session id {sid!r}")
         action = parts[4] if len(parts) > 4 else "snapshot"
         if action == "reset":
             # opening a new chat: retire the live window but keep the
@@ -1334,7 +1401,10 @@ class ProxyHandler(BaseHTTPRequestHandler):
         Legacy header senders get a 410 pointing at the verb."""
         sup = self.supervisor
         cfg = sup.config
-        raw = self.read_body_bytes()
+        try:
+            raw = self.read_body_bytes()
+        except BodyTooLarge:
+            return  # 413 already sent
         try:
             body = json.loads(raw.decode() or "{}")
         except Exception:
@@ -1742,6 +1812,15 @@ def start_supervisor(
     else:
         sec = SecurityConfig.from_env(bind_host=public_host)
 
+    # Refuse to start on a dangerous config rather than merely warning: a
+    # non-loopback bind with no API key is an unauthenticated RCE primitive.
+    fatal = sec.startup_errors()
+    if fatal:
+        for e in fatal:
+            print(f"\u2716 {e}", file=sys.stderr, flush=True)
+        manager.shutdown()
+        raise RuntimeError("; ".join(fatal))
+
     config = ProxyConfig(
         backend_root=backend_root,
         backend_api_key=backend_api_key,
@@ -1766,7 +1845,8 @@ def start_supervisor(
     sup = Supervisor(server, manager, config)
     server.supervisor = sup  # type: ignore[attr-defined]
 
-    # Emit security warnings at startup (visible in the serve banner)
+    # Emit security warnings at startup (visible in the serve banner).
+    # Fatal config problems are raised above, before any process starts.
     for w in sec.startup_warnings(ui_enabled=bool(ui)):
         print(f"\u26a0 {w}", file=sys.stderr, flush=True)
 

@@ -317,7 +317,8 @@ TOOLS: List[Dict] = [
         "description": (
             "Run one clm-mem tool directly (web_search, web_fetch, "
             "run_command, run_python, write_file, read_file, "
-            "list_files). Subject to the session's approval policy; "
+            "list_files). Subject to the session's approval policy: mutating "
+            "tools require approval when the mode is 'ask'/'deny'; only "
             "read-only tools always run."
         ),
         "inputSchema": _obj(
@@ -333,8 +334,9 @@ TOOLS: List[Dict] = [
         "name": "clm_sandbox_exec",
         "description": (
             "Run a shell command inside a workspace's sandbox "
-            "(bounded process; cwd is the sandbox root). Human-"
-            "initiated, so it bypasses approval prompts."
+            "(bounded process; cwd is the sandbox root). This is a model-"
+            "initiated call, so it goes through the session's approval "
+            "policy like any other exec tool (not an approval bypass)."
         ),
         "inputSchema": _obj(
             {

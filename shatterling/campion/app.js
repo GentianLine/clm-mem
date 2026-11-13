@@ -531,6 +531,8 @@ async function loadTools() {
   $("toolStatus").textContent = d.active
     ? `${(d.enabled_tools || []).length} tools · ${sb.isolation || ""}`
     : "tools off";
+  // Surface the real isolation level: a process jail is not a security boundary.
+  if (sb.caveat) $("toolStatus").title = sb.caveat;
   $("toolStatus").className = "tb-status" + (d.active ? " on" : "");
 }
 
@@ -673,6 +675,12 @@ async function loadSandbox() {
   catch (e) { $("fileList").innerHTML = `<li class="empty">${esc(e.message)}</li>`; return; }
   const sb = d.sandbox || {};
   $("sbIso").textContent = sb.isolation || "—";
+  if (sb.caveat) {
+    $("sbIso").title = sb.caveat;
+    $("sbIso").style.color = "#e0a13a"; // flag the weak-isolation case
+  } else {
+    $("sbIso").style.color = "";
+  }
   $("sbUsage").textContent = `${sb.files || 0} files · ${sb.bytes || 0} B`
     + ` / ${sb.quota_mb} MB`;
   const ul = $("fileList");

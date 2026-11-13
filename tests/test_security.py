@@ -50,13 +50,22 @@ class TestSecurityConfig:
         assert sec.cors_allowed_origin("https://anything.com") == "*"
         assert sec.cors_allowed_origin(None) is None  # still no ACAO for same-origin
 
-    def test_cors_allow_credentials(self):
+    def test_cors_allow_credentials_off_by_default(self):
+        # M-1: Access-Control-Allow-Credentials must NOT be sent by default --
+        # this API uses a Bearer header, so credentialed cross-origin requests
+        # are never needed and the header is an unnecessary leak surface.
         sec_specific = SecurityConfig(cors_origins=("https://a.com",))
-        assert sec_specific.cors_allow_credentials() is True
-        sec_wildcard = SecurityConfig(cors_origins=("*",))
-        assert sec_wildcard.cors_allow_credentials() is False
+        assert sec_specific.cors_allow_credentials() is False
         sec_none = SecurityConfig()
         assert sec_none.cors_allow_credentials() is False
+
+    def test_cors_allow_credentials_opt_in(self):
+        # When explicitly opted in, it is sent for a specific origin but never
+        # combined with a wildcard.
+        on = SecurityConfig(cors_origins=("https://a.com",), allow_credentials=True)
+        assert on.cors_allow_credentials() is True
+        wildcard = SecurityConfig(cors_origins=("*",), allow_credentials=True)
+        assert wildcard.cors_allow_credentials() is False
 
     def test_auth_enabled_rejects_no_key(self):
         sec = SecurityConfig(api_key="s3cret-key")
@@ -79,10 +88,19 @@ class TestSecurityConfig:
         assert not sec.is_exempt("/v1/chat/completions")
         assert not sec.is_exempt("/mcp")
 
-    def test_startup_warnings_no_auth_non_loopback(self):
+    def test_startup_error_no_auth_non_loopback(self):
+        # C-1: a non-loopback bind without an API key is a fatal error (the
+        # proxy is an unauthenticated RCE primitive), not just a warning.
         sec = SecurityConfig(api_key="", bind_host="0.0.0.0")
-        warnings = sec.startup_warnings()
-        assert any("non-loopback" in w for w in warnings)
+        errors = sec.startup_errors()
+        assert len(errors) == 1
+        assert "refusing to bind" in errors[0]
+        # loopback without auth is fine (local tool default)
+        assert SecurityConfig(api_key="", bind_host="127.0.0.1").startup_errors() == []
+        # non-loopback WITH a key is fine
+        assert (
+            SecurityConfig(api_key="k", bind_host="0.0.0.0").startup_errors() == []
+        )
 
     def test_startup_warnings_cors_wildcard_no_auth(self):
         sec = SecurityConfig(api_key="", cors_origins=("*",), bind_host="127.0.0.1")
@@ -320,24 +338,23 @@ class TestServerCORS:
         acao = resp.headers.get("Access-Control-Allow-Origin")
         assert acao == "https://studio.example.com"
 
-    def test_allow_credentials_header(self, cors_configured):
-        """Specific origins get Access-Control-Allow-Credentials: true."""
+    def test_no_allow_credentials_by_default(self, cors_configured):
+        """M-1: no Access-Control-Allow-Credentials unless explicitly opted in."""
         req = urllib.request.Request(f"{cors_configured.base_url}/health")
         req.add_header("Origin", "https://studio.example.com")
         resp = urllib.request.urlopen(req, timeout=10)
-        assert resp.headers.get("Access-Control-Allow-Credentials") == "true"
+        assert resp.headers.get("Access-Control-Allow-Credentials") is None
 
 
 class TestServerWarnings:
     """Startup warnings are emitted for dangerous configs."""
 
-    def test_warning_non_loopback_no_auth(self, tmp_path, capsys):
-        # We can't easily bind to 0.0.0.0 in tests (port conflicts), so we
-        # test the warning logic directly via SecurityConfig.
+    def test_error_non_loopback_no_auth(self, tmp_path, capsys):
+        # C-1: non-loopback without auth is a startup error, not a warning.
         sec = SecurityConfig(api_key="", bind_host="0.0.0.0")
-        warnings = sec.startup_warnings()
-        assert len(warnings) >= 1
-        assert "non-loopback" in warnings[0]
+        errors = sec.startup_errors()
+        assert len(errors) == 1
+        assert "refusing to bind" in errors[0]
 
     def test_warning_cors_star_no_auth(self, tmp_path):
         sec = SecurityConfig(api_key="", cors_origins=("*",), bind_host="127.0.0.1")

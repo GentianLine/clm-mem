@@ -17,20 +17,110 @@ so what lands in the memory window is bounded and predictable.
 from __future__ import annotations
 
 import html
+import ipaddress
 import json
 import os
 import re
+import socket
 import urllib.error
 import urllib.parse
 import urllib.request
 from typing import Dict, List, Optional
 
 UA = "clm-mem/0.4 (+https://github.com/unsloth/clm-mem) research client"
+
+#: URL schemes the web tools are allowed to open. Anything else (file://,
+#: gopher://, data://, ...) is refused before a request is ever built -- this
+#: is what stops ``web_fetch`` from being used as an arbitrary local-file read.
+ALLOWED_SCHEMES = {"http", "https"}
+
+#: Hostnames that are always refused even if they resolve to a public address
+#: (cloud/VM metadata endpoints use fixed names, not just the 169.254 range).
 BLOCKED_HOSTS = {
-    "169.254.169.254",
     "metadata.google.internal",
     "metadata.http.ibmcloud.com",
 }
+
+#: Optional operator allowlist of hosts that may resolve to a private/link-local
+#: address (e.g. an internal API on a LAN). Set via CLM_MEM_WEB_ALLOW_PRIVATE.
+_PRIVATE_ALLOWLIST: set = set()
+
+
+def _load_private_allowlist() -> set:
+    raw = os.environ.get("CLM_MEM_WEB_ALLOW_PRIVATE", "")
+    return {h.strip().lower() for h in raw.split(",") if h.strip()}
+
+
+def _ip_is_restricted(ip: ipaddress._BaseAddress) -> bool:
+    """True for addresses we must never fetch (metadata / internal ranges).
+
+    Catches the cases a hostname blocklist misses: IPv4-in-IPv6
+    (``::ffff:169.254.169.254``), decimal/octal host forms, and any
+    loopback / private / link-local / reserved target.
+    """
+    if ip.version == 6:
+        # Treat IPv4-mapped/compatible addresses by their embedded v4 part so
+        # ::ffff:169.254.169.254 is judged as the metadata IP, not a global v6.
+        if getattr(ip, "ipv4_mapped", None) is not None:
+            ip = ip.ipv4_mapped
+        elif getattr(ip, "sixtofour_addr", None) is not None:
+            ip = ip.sixtofour_addr
+    return (
+        ip.is_loopback
+        or ip.is_private
+        or ip.is_link_local
+        or ip.is_reserved
+        or ip.is_multicast
+        or ip.is_unspecified
+    )
+
+
+def _validate_url(url: str) -> None:
+    """Refuse non-http(s) schemes and any host that resolves to a restricted
+    address. Raises :class:`WebError` on violation.
+
+    The check is resolution-based (not a hostname blocklist): we resolve the
+    target with ``getaddrinfo`` and reject every address in the loopback /
+    private / link-local / reserved ranges unless it is explicitly allowlisted.
+    Callers that follow redirects must re-run this on each hop.
+    """
+    parsed = urllib.parse.urlparse(url)
+    scheme = (parsed.scheme or "").lower()
+    if scheme not in ALLOWED_SCHEMES:
+        raise WebError(
+            f"refused fetch of {scheme!r} URL: only http/https are allowed"
+        )
+    host = parsed.hostname
+    if not host:
+        raise WebError("refused fetch of URL with no host")
+    host_l = host.lower().strip(".")
+    if host_l in BLOCKED_HOSTS:
+        raise WebError(f"refused fetch of blocked host {host}")
+    allow_private = _load_private_allowlist()
+    try:
+        port = parsed.port
+    except ValueError:  # non-numeric port in an http(s) URL
+        raise WebError(f"refused fetch of {host!r}: invalid port") from None
+    if not port:
+        port = 443 if scheme == "https" else 80
+    try:
+        infos = socket.getaddrinfo(host, port, proto=socket.IPPROTO_TCP)
+    except socket.gaierror as exc:
+        raise WebError(f"could not resolve host {host!r}: {exc}") from None
+    if not infos:
+        raise WebError(f"could not resolve host {host!r}")
+    for info in infos:
+        addr = info[4][0]
+        try:
+            ip = ipaddress.ip_address(addr)
+        except ValueError:
+            continue
+        if _ip_is_restricted(ip) and host_l not in allow_private:
+            raise WebError(
+                f"refused fetch of {host}: it resolves to a restricted "
+                f"(loopback/private/link-local) address {addr}; this blocks "
+                "SSRF against internal services and cloud metadata"
+            )
 
 _TAG_RE = re.compile(r"(?s)<(script|style|noscript)[^>]*>.*?</\1>", re.I)
 _A_TAG = re.compile(r"<a\b[^>]*>", re.I)
@@ -111,12 +201,13 @@ def _get(
 ) -> tuple[int, str]:
     """GET ``url`` and return ``(status_code, body_text)``.
 
-    Returns the status so callers can tell an anti-bot interstitial (e.g. a
-    challenge page served with HTTP 202) apart from a genuine empty result set.
+    The URL is validated up front (http/https only, no restricted addresses --
+    see :func:`_validate_url`) so this cannot be pointed at local files or
+    internal/metadata endpoints. Returns the status so callers can tell an
+    anti-bot interstitial (e.g. a challenge page served with HTTP 202) apart
+    from a genuine empty result set.
     """
-    host = urllib.parse.urlparse(url).hostname or ""
-    if host in BLOCKED_HOSTS:
-        raise WebError(f"refused fetch of blocked host {host}")
+    _validate_url(url)
     req = urllib.request.Request(
         url, headers={"User-Agent": UA, "Accept-Language": "en", **(headers or {})}
     )
@@ -268,9 +359,19 @@ def run_search(provider: str, query: str, limit: int = 5) -> List[Dict[str, str]
 
 
 def fetch_page(url: str, limit: int = 6000) -> Dict[str, object]:
-    """Fetch one page as readable text (title + body)."""
+    """Fetch one page as readable text (title + body).
+
+    Only ``http``/``https`` URLs are accepted; a bare host is treated as
+    https. Any other scheme (file://, gopher://, data:, ...) raises
+    :class:`WebError` before a request is built.
+    """
+    # Reject an explicit non-http(s) scheme up front (e.g. file://, gopher://,
+    # data:) so it is not mangled by the bare-host https prefixing below.
+    if re.match(r"^[a-zA-Z][a-zA-Z0-9+.-]*:", url):
+        _validate_url(url)
     if "://" not in url:
         url = "https://" + url
+    _validate_url(url)  # fail fast on bad scheme / restricted host
     _status, raw = _get(url, max_bytes=min(400_000, limit * 40))
     title = ""
     m = re.search(r"<title[^>]*>(.*?)</title>", raw, re.I | re.S)

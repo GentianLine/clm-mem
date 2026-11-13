@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import os
+import secrets
 import shlex
 import sys
 import threading
@@ -484,9 +485,11 @@ class ToolManager:
                 error="tool disabled for this session",
             )
         entry = self._start_entry(call)
-        # human-initiated calls (composer buttons, CLI slash commands, MCP
-        # sandbox exec) are approved by definition; only model-initiated ones
-        # can be pending.
+        # Only genuinely human-initiated calls (composer buttons, CLI slash
+        # commands) are approved by definition. Model-initiated calls --
+        # including those arriving over MCP (origin="mcp"), which a model may
+        # drive -- go through the approval broker so an agent cannot bypass the
+        # session's approval policy for exec/file tools (audit M-2).
         if call.origin != "user" and self.broker.needs_approval(spec):
             ok = self.broker.request(call, spec, chat=self.cur_chat or "chat-001")
             if not ok:
@@ -604,15 +607,22 @@ class ToolManager:
         code = str(args.get("code", ""))
         if not code.strip():
             return ToolResult(False, "run_python needs code")
-        with self._lock:
-            self._seq += 1
-            n = self._seq
-        script = f"scratch/snippet_{n}.py"
+        # A unique, unpredictable name (not a per-manager sequence) so two
+        # concurrent calls never collide and a model can't plant/read a
+        # predictable snippet path across turns (audit M-4). The file is
+        # cleaned up after the run so no scratch persists.
+        script = f"scratch/snippet_{secrets.token_hex(8)}.py"
         self.sandbox.write_file(script, code)
         runner = "python3" if self.sandbox.mode == "docker" else sys.executable
         cmd = f"{shlex.quote(runner)} {shlex.quote(script)}"
         timeout = args.get("timeout")
-        res = self.sandbox.exec(cmd, timeout=float(timeout) if timeout else None)
+        try:
+            res = self.sandbox.exec(cmd, timeout=float(timeout) if timeout else None)
+        finally:
+            try:
+                self.sandbox.delete(script)
+            except Exception:
+                pass  # best-effort cleanup; a failed delete is not fatal
         detail = res.stdout.strip() or "(no output)"
         return ToolResult(
             ok=res.ok,
