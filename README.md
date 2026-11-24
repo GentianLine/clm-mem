@@ -25,6 +25,56 @@ This also means models can be improved by training within this harness and
 then having the trained model use the harness again until it performs worse than without it.
 
 
+## Current status (2026-11-24, `main` @ `deea886`)
+
+**Version 0.4.0 — feature-complete core, mid-refactor.** The package was
+renamed `clm_mem` → **`shatterling`** and split into subpackages (the rename
+is done; the docs below still use `clm-mem`, which remains the CLI name):
+
+| Subpackage | Role |
+|---|---|
+| `shatterling.engine` | pure memory engine: blocks, tagging, token counting, harness + 3-phase eviction, LLM clients |
+| `shatterling.purslane` | the `serve` daemon: llama.cpp-shaped proxy, session/branch API, studio REST, MCP, security layer |
+| `shatterling.campion` | the web studio (static assets served by purslane) |
+| `shatterling.clients` | `RemoteHarness` SDK + `connect()` helper |
+| `shatterling.tools` | agent tools (web / exec / fs), sandbox, tool manager |
+
+Two console scripts are installed: **`purslane`** (current name) and
+**`clm-mem`** (deprecated alias, removed in 0.5). Python imports use the new
+name (`from shatterling import ...`); the old `clm_mem` top-level package no
+longer exists in this repo.
+
+State of the world:
+
+- **Tests: 162 passing** (`.venv/bin/python -m pytest tests/ -q`, ~6 min, mock
+  backends only — no GPU, weights, or network needed).
+- **End-to-end verified:** `serve --use-mock` brings up the full topology
+  (proxy + mock backend + mock SystemOne), opens branches, runs turns with
+  harness truth in the reply, and serves the studio + MCP at the same URL.
+- **Security audit done** (`SECURITY_AUDIT.md`, 2026-11-09) and remediated in
+  `deea886`: SSRF/scheme guards on web tools, request-body cap, no upstream
+  auth-header relay by default, session/workspace id validation,
+  per-session `run_python` scratch paths, sandbox caveats surfaced in UI.
+  Binding non-loopback without an API key now **refuses to start** (was: warn).
+- **Explicit session API is the contract** (milestones M3/M4): memory lives
+  behind `POST /v1/clm/sessions` + `.../turns`; legacy headers get a 410.
+- **Milestone status** (plan in `docs/refactor-plan.md`):
+
+| Milestone | Status |
+|---|---|
+| M0 chat-isolation spike, phase-3 ranking semantics | done (test re-expressed on both freshness channels) |
+| M1 layering (`engine/` `purslane/` `clients/`) | done (shatterling split) |
+| M2 declarative route table + timing recorder | **stub only** — `purslane/routes.py` and `purslane/metrics.py` exist but are not wired into the server or tests yet |
+| M3 explicit session API (breaking, no compat window) | done |
+| M4 clients migrate (studio / CLI / MCP / SDK) | done |
+| M5 flip & clean | vaporware by design; only the 410 legacy-header shim remains to delete once consumers migrate |
+| M6 true streaming (real SSE deltas) | not started — `/turns` SSE is still a post-hoc replay of the finished reply |
+| M7 harness-only `clm-mem api` subcommand | not started |
+
+Open items worth knowing before you hack: see the **Roadmap** section at the
+bottom. Unmerged local branch: `fix/search-ddg-lite-fallback` (one commit —
+ddg search results fix).
+
 ## How it works
 
 Every message lives in the live window as a `Block` tagged
@@ -186,7 +236,7 @@ curl -X POST http://localhost:8080/v1/clm/sessions/ws%3Aunsloth-user/turns \
 ```
 
 ```python
-from clm_mem import RemoteHarness
+from shatterling import RemoteHarness
 h = RemoteHarness("http://localhost:8080/v1", session="ws:unsloth-user")
 h.open()                              # POST /v1/clm/sessions (idempotent)
 h.turn("Remember: the deploy port is 8080.")   # POST .../turns
@@ -526,7 +576,7 @@ You should see phases fire like:
 ## Use as a library
 
 ```python
-from clm_mem import MemoryHarness, HarnessConfig, OpenAIChat
+from shatterling import MemoryHarness, HarnessConfig, OpenAIChat
 
 h = MemoryHarness(
     OpenAIChat("http://localhost:8000/v1", "Qwen/Qwen3-8B-Instruct"),
@@ -556,6 +606,63 @@ python -m pytest tests/ -q     # harness + serve/proxy tests, no GPU/server need
   occasionally forget the markers   the post-turn router pass is the backstop.
 - Phase-3 offload keeps pointer stubs in-window, so a pathological long-term-
   heavy session still needs `--max-context-tokens` headroom for the preamble.
+
+## Roadmap / TODO
+
+Ordered roughly by value; each item is small enough for one feature branch
+(see `AGENTS.md` for the workflow).
+
+**Ship what's half-built (M2 finish)**
+- [ ] Wire the route table: make `ProxyHandler` dispatch through
+      `purslane/routes.py::match()` instead of if-chains, and add the promised
+      parity test asserting *documented routes == implemented routes*.
+      Until then `routes.py` is dead documentation that can drift silently.
+- [ ] Wire `TimingRecorder`/`SessionMetrics` (`purslane/metrics.py`) into
+      `/turns` responses (the `_timings` sidecar + final SSE frame the module
+      docstring already describes) — or delete the module. It is currently
+      imported by nothing.
+
+**M6 — true streaming**
+- [ ] `OpenAIChat.chat(stream=True)` with incremental tag-splitting in the
+      harness, so `/turns` streams real deltas and event chips live instead of
+      replaying a finished string. Test that `<longterm>`/`<shortterm>` markup
+      never leaks into visible deltas.
+
+**M7 — harness-only API (documents G1)**
+- [ ] `clm-mem api` subcommand: session verbs only, backend required or mock,
+      no studio / native passthrough routes. Lets the engine run as a bare
+      memory API without the full proxy surface.
+
+**Security follow-ups (post-audit)**
+- [ ] TLS story: document the reverse-proxy + TLS/mTLS setup for any
+      non-loopback deployment (server currently warns, does not terminate TLS).
+- [ ] Per-route capability split: let a memory-only client get no exec/file/
+      web-fetch routes at all (audit C-1 remediation left this as a
+      "consider").
+- [ ] Rate limiting on the proxy (no limits today; audit noted it).
+
+**Housekeeping**
+- [ ] Merge or explicitly drop `fix/search-ddg-lite-fallback` (ddg search fix,
+      one commit ahead of main).
+- [ ] Delete the 410 legacy-header shim once no downstream consumer sends
+      `X-Cllm-Mem-*` headers (M5; Unsloth Studio integration is the one to
+      check).
+- [ ] Update `AGENTS.md` "Project Orientation" — it still maps old flat
+      `clm_mem/*` paths; refresh to the subpackage layout.
+- [ ] Refresh `docs/library-migration.md`: it targets the now-merged
+      `spike/session-api` branch and `clm_mem/remote.py`; re-point at main +
+      `shatterling/clients/sdk.py`.
+- [ ] Add a `CHANGELOG.md` (0.4.0's breaking rename deserves one).
+- [ ] Clean repo root: remove agent scratch files (`_probe.py`, `_sec.txt`,
+      `_secfix.txt`, `_clmmem_test.txt`) or gitignore the pattern.
+
+**0.5 planning**
+- [ ] Remove the deprecated `clm-mem` console-script alias (keep `purslane`).
+- [ ] Decide distribution name: publish to PyPI as `shatterling`? Rename the
+      repo / CLI accordingly, or keep `clm-mem` as the public brand and treat
+      `shatterling` as the Python package.
+- [ ] Re-run the security audit after M2/M6 land (new dispatch path + new
+      streaming code are exactly where regressions hide).
 
 ## License
 
