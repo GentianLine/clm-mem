@@ -87,9 +87,7 @@ def _validate_url(url: str) -> None:
     parsed = urllib.parse.urlparse(url)
     scheme = (parsed.scheme or "").lower()
     if scheme not in ALLOWED_SCHEMES:
-        raise WebError(
-            f"refused fetch of {scheme!r} URL: only http/https are allowed"
-        )
+        raise WebError(f"refused fetch of {scheme!r} URL: only http/https are allowed")
     host = parsed.hostname
     if not host:
         raise WebError("refused fetch of URL with no host")
@@ -121,6 +119,7 @@ def _validate_url(url: str) -> None:
                 f"(loopback/private/link-local) address {addr}; this blocks "
                 "SSRF against internal services and cloud metadata"
             )
+
 
 _TAG_RE = re.compile(r"(?s)<(script|style|noscript)[^>]*>.*?</\1>", re.I)
 _A_TAG = re.compile(r"<a\b[^>]*>", re.I)

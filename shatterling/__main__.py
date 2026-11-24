@@ -6,7 +6,6 @@ Equivalent to the installed CLI scripts:
     clm-mem   demo
 """
 
-
 from .cli import main
 
 if __name__ == "__main__":

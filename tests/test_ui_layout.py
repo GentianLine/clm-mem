@@ -17,8 +17,7 @@ import re
 
 import shatterling as _clm_mod
 
-STATIC = os.path.normpath(
-    os.path.join(os.path.dirname(_clm_mod.__file__), "campion"))
+STATIC = os.path.normpath(os.path.join(os.path.dirname(_clm_mod.__file__), "campion"))
 
 
 def read(name: str) -> str:

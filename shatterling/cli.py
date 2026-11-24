@@ -799,7 +799,7 @@ def cmd_chat(a: argparse.Namespace) -> None:
                 api_key=getattr(a, "systemone_api_key", ""),
             )
         except ValueError as e:
-            parser.error(str(e))
+            sys.exit(f"error: {e}")
         try:
             probe = systemone.system_one(
                 "test", {"q": {"type": "noul", "instructions": "is this a test?"}}
@@ -984,7 +984,7 @@ def _add_serve_flags(sub: argparse.ArgumentParser) -> None:
         help="bearer token required on all /v1/* and /mcp routes. "
         "Clients send 'Authorization: Bearer <key>'. When unset, "
         "falls back to $CLM_MEM_API_KEY env var. Generate one with: "
-        "python -c \"import secrets; print(secrets.token_urlsafe(32))\"",
+        'python -c "import secrets; print(secrets.token_urlsafe(32))"',
     )
     sub.add_argument(
         "--cors-origins",
@@ -1053,9 +1053,11 @@ def cmd_serve(a: argparse.Namespace) -> None:
         sys_mode = "none"
 
     # Parse CORS origins
-    cors_origins = tuple(
-        o.strip() for o in a.cors_origins.split(",") if o.strip()
-    ) if a.cors_origins else ()
+    cors_origins = (
+        tuple(o.strip() for o in a.cors_origins.split(",") if o.strip())
+        if a.cors_origins
+        else ()
+    )
 
     sup = start_supervisor(
         public_host=a.public_host,
@@ -1111,12 +1113,20 @@ def cmd_serve(a: argparse.Namespace) -> None:
         # security status
         sec = sup.config.security
         if sec.is_auth_enabled():
-            key_display = sec.api_key[:4] + "…" + sec.api_key[-4:] if len(sec.api_key) > 8 else "***"
+            key_display = (
+                sec.api_key[:4] + "…" + sec.api_key[-4:]
+                if len(sec.api_key) > 8
+                else "***"
+            )
             print(f"  api auth         : ENABLED (key: {key_display})")
         else:
             print("  api auth         : disabled (no --api-key set)")
         if sec.cors_origins:
-            origins_str = ", ".join(sec.cors_origins) if len(sec.cors_origins) <= 3 else f"{len(sec.cors_origins)} origins"
+            origins_str = (
+                ", ".join(sec.cors_origins)
+                if len(sec.cors_origins) <= 3
+                else f"{len(sec.cors_origins)} origins"
+            )
             print(f"  cors             : {origins_str}")
         else:
             print("  cors             : same-origin only (default)")

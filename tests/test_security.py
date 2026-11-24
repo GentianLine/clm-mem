@@ -18,7 +18,6 @@ import pytest
 from shatterling.purslane.security import SecurityConfig
 from shatterling.purslane.server import start_supervisor
 
-
 # ---------------------------------------------------------------------------
 # Unit tests for SecurityConfig (no server needed)
 # ---------------------------------------------------------------------------
@@ -98,9 +97,7 @@ class TestSecurityConfig:
         # loopback without auth is fine (local tool default)
         assert SecurityConfig(api_key="", bind_host="127.0.0.1").startup_errors() == []
         # non-loopback WITH a key is fine
-        assert (
-            SecurityConfig(api_key="k", bind_host="0.0.0.0").startup_errors() == []
-        )
+        assert SecurityConfig(api_key="k", bind_host="0.0.0.0").startup_errors() == []
 
     def test_startup_warnings_cors_wildcard_no_auth(self):
         sec = SecurityConfig(api_key="", cors_origins=("*",), bind_host="127.0.0.1")

@@ -18,6 +18,7 @@ may be:
 Session-level aggregation lives in :class:`SessionMetrics` so the debug panel can
 show rolling tok/s across turns without re-parsing history.
 """
+
 from __future__ import annotations
 
 import time
@@ -27,6 +28,7 @@ from typing import Dict, List, Optional
 # ---------------------------------------------------------------------------
 # Per-request timing
 # ---------------------------------------------------------------------------
+
 
 @dataclass
 class TimingRecorder:
@@ -114,6 +116,7 @@ class TimingRecorder:
     def sse_event_line(self) -> str:
         """Render as an SSE data line (for streaming responses)."""
         import json
+
         body = {"type": "clm-mem-timings", **self.payload()}
         return f'data: {json.dumps(body, separators=(",", ":"))}\n\n'
 
@@ -121,6 +124,7 @@ class TimingRecorder:
 # ---------------------------------------------------------------------------
 # Per-session rolling metrics (for the debug panel's tok/s display)
 # ---------------------------------------------------------------------------
+
 
 @dataclass
 class SessionMetrics:
@@ -151,7 +155,9 @@ class SessionMetrics:
             if self.ema_tok_per_s is None:
                 self.ema_tok_per_s = tps
             else:
-                self.ema_tok_per_s = round(alpha * tps + (1 - alpha) * self.ema_tok_per_s, 2)
+                self.ema_tok_per_s = round(
+                    alpha * tps + (1 - alpha) * self.ema_tok_per_s, 2
+                )
         self.last_ttfb_ms = rec.ttfb_ms
         self.last_total_ms = rec.total_ms
         p = rec.payload()

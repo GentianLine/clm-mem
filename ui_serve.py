@@ -9,9 +9,14 @@ sup = start_supervisor(
     harness_kwargs={"workdir": "/tmp/clm_ui_workdir", "max_context_tokens": 4096},
     timeout=30,
 )
-print(json.dumps({"ui": sup.ui_url if hasattr(sup, "ui_url") else None,
-                  "base": sup.base_url}), flush=True)
-open("/tmp/clm_ui_url.json", "w").write(json.dumps(
-    {"ui": getattr(sup, "ui_url", None), "base": sup.base_url}))
+print(
+    json.dumps(
+        {"ui": sup.ui_url if hasattr(sup, "ui_url") else None, "base": sup.base_url}
+    ),
+    flush=True,
+)
+open("/tmp/clm_ui_url.json", "w").write(
+    json.dumps({"ui": getattr(sup, "ui_url", None), "base": sup.base_url})
+)
 while True:
     time.sleep(5)

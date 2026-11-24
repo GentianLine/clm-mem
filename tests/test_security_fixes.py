@@ -19,14 +19,17 @@ from shatterling.engine.harness import MemoryHarness
 from shatterling.engine.llm import StubChat
 from shatterling.engine.config import HarnessConfig
 
-
 # ---------------------------------------------------------------------------
 # C-3 / C-4: scheme restriction + resolution-based SSRF guard
 # ---------------------------------------------------------------------------
 
 
 def test_web_fetch_rejects_non_http_schemes():
-    for url in ("file:///etc/passwd", "gopher://127.0.0.1:6379/_INFO", "data:text/plain,hi"):
+    for url in (
+        "file:///etc/passwd",
+        "gopher://127.0.0.1:6379/_INFO",
+        "data:text/plain,hi",
+    ):
         with pytest.raises(_web.WebError):
             _web.fetch_page(url)
 
@@ -44,7 +47,9 @@ def test_web_fetch_blocks_metadata_and_private():
 
 def test_web_fetch_allows_public_host(monkeypatch):
     monkeypatch.setattr(
-        _web.socket, "getaddrinfo", lambda *a, **k: [(2, 1, 6, "", ("93.184.216.34", 80))]
+        _web.socket,
+        "getaddrinfo",
+        lambda *a, **k: [(2, 1, 6, "", ("93.184.216.34", 80))],
     )
     # must not raise
     _web._validate_url("http://example.com/x")

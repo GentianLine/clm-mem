@@ -114,7 +114,9 @@ CHAT_RE = re.compile(r"chat-(\d{3,})$")
 #: workspace branch ``ws:<name>`` or a bare id. One pattern applied in every
 #: handler that accepts a sid; anything else is rejected with 400 before it can
 #: reach path-building code.
-SID_RE = re.compile(r"(?:ws:[A-Za-z0-9][A-Za-z0-9 ._\-]{0,63}|[A-Za-z0-9][A-Za-z0-9._\-]{0,127})$")
+SID_RE = re.compile(
+    r"(?:ws:[A-Za-z0-9][A-Za-z0-9 ._\-]{0,63}|[A-Za-z0-9][A-Za-z0-9._\-]{0,127})$"
+)
 
 
 def chat_slot(chat: str) -> int:
@@ -293,7 +295,9 @@ class ProxyHandler(BaseHTTPRequestHandler):
                 "Access-Control-Allow-Headers",
                 "Content-Type, Authorization, X-Cllm-Mem-Legacy-Session-Detect",
             )
-            self.send_header("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
+            self.send_header(
+                "Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS"
+            )
 
     def _auth_check(self) -> bool:
         """Return True if the request is authorized (or auth is disabled).

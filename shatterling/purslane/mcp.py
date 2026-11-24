@@ -70,9 +70,7 @@ class HttpApi:
     expired contract and would earn their 410 over here too.
     """
 
-    def __init__(
-        self, base_url: str = "", headers: Optional[Dict[str, str]] = None
-    ):
+    def __init__(self, base_url: str = "", headers: Optional[Dict[str, str]] = None):
         self.base = (base_url or "").rstrip("/")
         self.headers = {
             k: v
@@ -99,8 +97,10 @@ class HttpApi:
         body: Optional[Dict[str, Any]] = None,
     ) -> tuple[int, Dict[str, Any]]:
         url = f"{self.base}{path}"
-        data = json.dumps(body).encode() if isinstance(body, dict) else (
-            b"{}" if method.upper() != "GET" else None
+        data = (
+            json.dumps(body).encode()
+            if isinstance(body, dict)
+            else (b"{}" if method.upper() != "GET" else None)
         )
         req = urllib.request.Request(
             url,
@@ -111,7 +111,7 @@ class HttpApi:
         req.add_header("Content-Type", "application/json")
         try:
             with urllib.request.urlopen(req, timeout=_TIMEOUT) as r:  # daemon
-                raw = (r.read() or b"")
+                raw = r.read() or b""
                 status = int(r.status)
         except urllib.error.HTTPError as exc:  # non-2xx still carries a JSON body
             try:
@@ -136,7 +136,6 @@ class HttpApi:
     def ensure_open(self, sid: str) -> None:
         """Mirror the old ``harness_for`` lazy-create through the open verb."""
         self.ok("POST", "/v1/clm/sessions", {"session": sid})
-
 
 
 def _sid(args: Dict[str, Any]) -> str:
@@ -519,7 +518,9 @@ def _tool_result(api: HttpApi, name: str, args: Dict[str, Any]) -> Dict:
             snap = _strip_extra(snap)
             tag = args.get("tag")
             if tag:
-                snap["blocks"] = [b for b in snap.get("blocks", []) if b.get("tag") == tag]
+                snap["blocks"] = [
+                    b for b in snap.get("blocks", []) if b.get("tag") == tag
+                ]
             return _text(json.dumps(snap))
         if name == "clm_recall":
             q = quote(str(args.get("query", "")))
@@ -571,12 +572,10 @@ def _tool_result(api: HttpApi, name: str, args: Dict[str, Any]) -> Dict:
             try:
                 pct = float(args.get("pct", -1.0))
             except (TypeError, ValueError):
-                return _text("pct must be in [0, 1)", is_error=True)   
+                return _text("pct must be in [0, 1)", is_error=True)
             if not 0.0 <= pct < 1.0:
                 return _text("pct must be in [0, 1)", is_error=True)
-            st, p = api.request(
-                "POST", ep + "/settings", {"shortterm_keep_pct": pct}
-            )
+            st, p = api.request("POST", ep + "/settings", {"shortterm_keep_pct": pct})
             if not 200 <= st < 300:
                 return _text(_err_msg(p), is_error=True)
             return _text(f"shortterm_keep_pct = {pct}")
