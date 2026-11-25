@@ -1,8 +1,9 @@
-# Migrating a library onto explicit sessions (clm-mem 0.3 -> session-api)
+# Migrating a library onto explicit sessions (clm-mem 0.3 -> 0.4.0, now on main)
 
 Audience: whoever owns an integration **library** that talks to a running
-`clm-mem serve` — both the ones already in this repo (`clm_mem.remote.RemoteHarness`,
-the web studio's `app.js`, the MCP adapter, `cli.py --connect`) and the external
+`purslane` / `clm-mem serve` — both the ones already in this repo
+(`shatterling.clients.sdk.RemoteHarness`, the web studio's `app.js`, the MCP
+adapter, `cli.py --connect`) and the external
 ones named in the plan (Unsloth Studio integration, openai-python users, any agent
 runtime that rides `/v1/chat/completions` with a session header).
 
@@ -15,17 +16,16 @@ unaffected by this migration; (a) and (b) both ride the new verbs.
 
 ---
 
-## 1. Where the branch is
+## 1. Where this lives
 
-Everything below lives on **`spike/session-api`** (HEAD `6f86c3f`), not on `main`.
+The session API described here **landed on `main` in 0.4.0**, and the package was
+renamed `clm_mem` -> `shatterling`. The Python SDK now lives at
+`shatterling/clients/sdk.py` (`connect()` / `RemoteHarness`); the engine under
+`shatterling/engine/`; the proxy/serving surface under `shatterling/purslane/`.
+This document is the migration record for libraries that still speak the old
+header-driven contract.
 
-```
-main                       old contract: header-driven memory, implicit sessions
-spike/chat-isolation-seed  merged into spike/session-api at 085e691 (D1 landed)
-spike/session-api          THE branch — M3 shipped on-branch, M4 folded in, green (115 tests)
-```
-
-Key facts about the branch:
+Key facts about the change:
 
 * **It is a breaking change with no compat window.** The original plan (§7.3 of
   `docs/refactor-plan.md`) promised a `--memory-entry=both` transition mode and a
@@ -50,9 +50,9 @@ Key facts about the branch:
   when omitted (engine-level change; relevant to engine consumers who want the
   event chips without an HTTP round trip).
 
-Pin against this branch until it lands on `main`: install editable or track the
-branch, and treat anything documented in `README.md` ("Client contract") plus
-`clm_mem/remote.py` as the reference implementation. The SDK is now the contract:
+Install the 0.4.0+ package (or editable from `main`) and treat anything
+documented in `README.md` ("Client contract") plus `shatterling/clients/sdk.py`
+as the reference implementation. The SDK is the contract:
 whatever `RemoteHarness` can express, hand-rolled HTTP should be able to express,
 and vice versa — if your library can do something the SDK cannot (or vice versa),
 that is a bug in one of them, not a second dialect.
@@ -61,7 +61,7 @@ that is a bug in one of them, not a second dialect.
 
 ## 2. The new contract at a glance
 
-| Concept | Old (`main`) | New (`spike/session-api`) |
+| Concept | Old (0.3, header-driven) | New (0.4.0, on main) |
 |---|---|---|
 | Start memory | side effect: first request that mentions an id creates it | `POST /v1/clm/sessions` — explicit, returns 201/200 + `created` flag |
 | Send a message | `POST /v1/chat/completions` + session header | `POST /v1/clm/sessions/<id>/turns` |
@@ -176,19 +176,19 @@ Unaffected by the transport migration — no HTTP, no headers. Two notes anyway:
   `since_event_seq=<last seq you saw>` to `step()` and get `{"reply", "events"}`;
   omit it and the bare-string return stands (the old signature is a subset of the
   new one, so existing code keeps compiling).
-* The layering plan (§6 of `docs/refactor-plan.md`) will move engine modules under
-  `clm_mem/engine/` with flat aliases kept for one release. If your library imports
-  `from clm_mem import MemoryHarness`, that keeps working; if it reaches into
-  `clm_mem.server` to get harness machinery, stop — the planned split makes that
-  an embedding concern (`serving/supervisor.py`), not an engine one.
+* The package is now `shatterling`, split into subpackages. Engine consumers
+  import `from shatterling.engine.harness import MemoryHarness`. If your library
+  reaches into the serving layer to get harness machinery, stop — that is a
+  `shatterling.purslane.server` (proxy) concern, not an engine one; keep engine
+  and serving imports separate.
 
 ### 4.2 SDK consumers (`RemoteHarness`)
 
-This is where most library migration happens, and on this branch it is already
-half-done: `clm_mem/remote.py` grew `open()` / `turn()`, and `step()` became sugar
-that opens once then turns. The old `main` version of the same class rode
-`/v1/chat/completions` with a session header — so upgrading the package *is* the
-migration for anyone who vendored or pinned it.
+This is where most library migration happens, and it is done on `main`:
+`shatterling/clients/sdk.py` has `open()` / `turn()`, and `step()` is sugar that
+opens once then turns. The pre-0.4 SDK rode `/v1/chat/completions` with a session
+header — so upgrading the package *is* the migration for anyone who vendored or
+pinned it.
 
 Advice for using the new SDK **differently** than old code used the old one:
 
@@ -229,7 +229,8 @@ instead of reimplementing it.** The refactor's end state makes the SDK the
 reference client — every studio capability is expressible through it, and a
 parallel hand-rolled client drifts from that on day one. If you must stay
 hand-rolled (dependency weight, async event loop), mirror exactly what
-`remote.py` does: same paths, same bodies, same percent-encoding, same error
+`shatterling/clients/sdk.py` does: same paths, same bodies, same
+percent-encoding, same error
 mapping — then your code is reviewable against the SDK in tests rather than
 against vibes.
 
@@ -243,7 +244,7 @@ resp = requests.post(
     json={"messages": [{"role": "user", "content": text}]},
 )
 
-# AFTER (spike/session-api): explicit verbs
+# AFTER (0.4.0, on main): explicit verbs
 base = "http://host:8080/v1"
 root = base[: -len("/v1")]
 requests.post(f"{root}/v1/clm/sessions", json={"session": f"ws:{name}"})
@@ -257,7 +258,7 @@ reply = resp.json()["choices"][0]["message"]["content"]   # truth in resp.json()
 ...or simply:
 
 ```python
-from clm_mem import RemoteHarness            # or connect(url, workspace=name)
+from shatterling.clients.sdk import connect, RemoteHarness   # connect(url, workspace=name) is sugar
 h = RemoteHarness(base_url, session=f"ws:{name}")
 h.open(options={"max_context_tokens": 8192})     # once, at init — not lazily
 r = h.turn(text, chat=chat_id)                  # full payload, no extra snapshot call
@@ -309,17 +310,17 @@ For a library specifically, that means:
 
 ## 6. Per-consumer checklists
 
-### `clm_mem.remote.RemoteHarness` (in-repo SDK)
-- [x] Already migrated on this branch (`open`/`turn`, header-free). Downstream
-      libraries get the fix by upgrading against the branch.
-- [ ] External consumers pinned to an old wheel: update dependency to track
-      `spike/session-api` (or wait for it to land on `main`), then apply §4.2.
+### `shatterling.clients.sdk.RemoteHarness` (in-repo SDK)
+- [x] Already migrated on `main` (0.4.0): `open`/`turn`, header-free. Downstream
+      libraries get the fix by upgrading to 0.4.0+.
+- [ ] External consumers pinned to a pre-0.4 wheel: bump the dependency to 0.4.0+
+      (it is on `main`), update imports to `shatterling.clients.sdk`, then apply §4.2.
 
-### Web studio (`clm_mem/static/app.js`) — reference client
+### Web studio (`shatterling/campion/app.js`) — reference client
 - [x] Migrated: `openSession()` before turns, explicit slots, no headers. Copy its
       patterns when in doubt; it is the same-origin proof that the contract works.
 
-### MCP adapter (`clm_mem/mcp.py`)
+### MCP adapter (`shatterling/purslane/mcp.py`)
 - [x] `clm_open_session` added; `clm_chat` opens implicitly (convenience for agent
       loops). MCP clients of your library should call `clm_open_session` when they
       need creation-time options, exactly like HTTP libraries do.
@@ -368,8 +369,8 @@ For a library specifically, that means:
 
 ## 8. Suggested sequencing for the owner of such a library
 
-1. Read `README.md` *Client contract* + `clm_mem/remote.py` on this branch (they
-   are the spec).
+1. Read `README.md` *Client contract* + `shatterling/clients/sdk.py` (they are
+   the spec).
 2. Remove header code; make open explicit at connection setup (§4.2, §3.2).
 3. Switch sends to `/turns`; read harness truth from replies instead of polling.
 4. Map ids onto `ws:<name>` branches + chat slots (§3.4).
@@ -378,6 +379,6 @@ For a library specifically, that means:
    convenience until S2.
 7. Coordinate with Unsloth Studio integration before M5 deletes the 410 shim.
 
-Nothing in this plan requires server changes — the branch is complete and green
-for it. What remains on the repo side (M6 true streaming, M7 `clm-mem api`, layer
+Nothing in this plan requires server changes — `main` (0.4.0) is current and
+green for it. What remains on the repo side (M6 true streaming, M7 `clm-mem api`, layer
 split) is independent; a library migrating today is compatible with all of it.
