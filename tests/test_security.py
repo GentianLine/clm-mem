@@ -15,7 +15,7 @@ import urllib.request
 
 import pytest
 
-from shatterling.purslane.security import SecurityConfig
+from shatterling.purslane.security import RateLimiter, SecurityConfig
 from shatterling.purslane.server import start_supervisor
 
 # ---------------------------------------------------------------------------
@@ -421,3 +421,30 @@ class TestSDKAuth:
         reply = h.step("hello world")
         assert isinstance(reply, str)
         assert len(reply) > 0
+
+
+# ---------------------------------------------------------------------------
+# Rate limiting (audit: "no limits today")
+# ---------------------------------------------------------------------------
+
+
+class TestRateLimiter:
+    def test_allows_up_to_limit_then_denies(self):
+        rl = RateLimiter(limit_per_min=3)
+        assert [rl.allow("1.2.3.4") for _ in range(3)] == [True, True, True]
+        # 4th request in the same window is rejected
+        assert rl.allow("1.2.3.4") is False
+
+    def test_keys_are_independent(self):
+        rl = RateLimiter(limit_per_min=1)
+        assert rl.allow("a") is True
+        assert rl.allow("a") is False  # "a" exhausted
+        assert rl.allow("b") is True  # "b" has its own budget
+
+    def test_zero_or_negative_disables(self):
+        for lim in (0, -5):
+            rl = RateLimiter(limit_per_min=lim)
+            assert all(rl.allow("x") for _ in range(100))
+
+    def test_retry_after_is_positive(self):
+        assert 1 <= RateLimiter(limit_per_min=1).retry_after() <= 61

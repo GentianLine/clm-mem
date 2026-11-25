@@ -10,3 +10,7 @@ archive.jsonl
 
 # local smoke-test scratch
 smoke/
+
+# agent scratch files
+_*.py
+_*.txt

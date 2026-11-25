@@ -44,8 +44,8 @@ def sse_call(sup, path, body, headers=None):
     events = []
     for raw_line in resp:
         line = raw_line.decode().strip()
-        if line == "event: clm-mem-event":
-            continue  # the matching `data:` line carries the payload
+        if line in ("event: clm-mem-event", "event: clm-mem-timings"):
+            continue  # named events: skip the event line, handle data below
         if not line.startswith("data: "):
             continue
         payload = line[len("data: ") :]
@@ -58,6 +58,8 @@ def sse_call(sup, path, body, headers=None):
         if obj.get("object") == "clm-mem-event":
             events.append(obj)
             continue
+        if obj.get("type") == "clm-mem-timings":
+            continue  # timing sidecar, not a chat chunk
         delta = obj["choices"][0]["delta"]
         text += delta.get("content", "") or ""
     resp.close()
@@ -114,6 +116,87 @@ def test_options_cors(sup):
     # default: same-origin only -- no ACAO for requests without Origin
     acao = resp.headers.get("Access-Control-Allow-Origin")
     assert acao is None
+
+
+# -- api-only mode (M7: bare memory API) ---------------------------------------
+def test_api_only_exposes_only_clm_verbs(tmp_path):
+    """`clm-mem api` serves /health + /v1/clm/* and nothing else: no native
+    passthrough, no chat completions, no studio. Every other route -> 404."""
+    s = start_supervisor(
+        public_port=0,
+        served_model="mock-model",
+        backend_mode="mock",
+        systemone_mode="mock",
+        api_only=True,
+        harness_kwargs={"workdir": str(tmp_path), "max_context_tokens": 600},
+        timeout=30,
+    )
+    try:
+        # allowed: health + CLM session verbs
+        st, health = http_call(s, "/health")
+        assert st == 200 and health["status"] == "ok"
+        st, lst = http_call(s, "/v1/clm/sessions")
+        assert st == 200
+        # a session verb actually works end-to-end in api-only mode
+        st, d = http_call(s, "/v1/clm/sessions", "POST", {"session": "ws:api"})
+        assert st in (200, 201), d
+
+        # rejected: native passthrough + chat completions + studio
+        for path in (
+            "/props",
+            "/v1/models",
+            "/v1/chat/completions",
+            "/",
+            "/index.html",
+        ):
+            st, _ = http_call(s, path)
+            assert st == 404, f"{path} should be hidden in api-only mode, got {st}"
+
+        # rejected: OPTIONS preflight on a non-CLM path is also gated
+        req = urllib.request.Request(
+            f"{s.base_url}/v1/chat/completions", method="OPTIONS"
+        )
+        try:
+            resp = urllib.request.urlopen(req, timeout=30)
+            assert False, "OPTIONS on a hidden route should be rejected"
+        except urllib.error.HTTPError as e:
+            assert e.code == 404
+    finally:
+        s.shutdown()
+
+
+# -- rate limiting (audit: "no limits today") ---------------------------------
+def test_rate_limit_returns_429_and_exempts_health(tmp_path):
+    """A low per-minute budget yields 429 + Retry-After once exhausted, while
+    /health (load-balancer probes) is never throttled."""
+    s = start_supervisor(
+        public_port=0,
+        served_model="mock-model",
+        backend_mode="mock",
+        systemone_mode="mock",
+        rate_limit_per_min=3,
+        harness_kwargs={"workdir": str(tmp_path), "max_context_tokens": 600},
+        timeout=30,
+    )
+    try:
+        # first few requests are fine
+        for _ in range(3):
+            st, _ = http_call(s, "/v1/clm/sessions")
+            assert st == 200
+        # the next one trips the limiter -> 429 with a Retry-After header
+        req = urllib.request.Request(f"{s.base_url}/v1/clm/sessions", method="GET")
+        try:
+            urllib.request.urlopen(req, timeout=30)
+            assert False, "expected 429 after exhausting the rate limit"
+        except urllib.error.HTTPError as e:
+            assert e.code == 429
+            assert int(e.headers.get("Retry-After", "0")) >= 1
+
+        # /health is exempt and still answers even while over budget
+        st, health = http_call(s, "/health")
+        assert st == 200 and health["status"] == "ok"
+    finally:
+        s.shutdown()
 
 
 def _open_branch(sup, sid, **opts):

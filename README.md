@@ -331,6 +331,14 @@ The server prints warnings to stderr when it detects dangerous configurations:
 - CORS set to `*` with no authentication (CSRF risk)
 - Non-loopback bind without auth (LAN exposure)
 
+### TLS / reverse-proxy deployment
+
+The server is plain HTTP and does **not** terminate TLS. For any deployment
+reachable beyond localhost, put a TLS-terminating reverse proxy in front of it
+and enable `--api-key`. Full topologies, nginx/Caddy configs (including the
+Server-Sent-Events buffering gotcha for `/turns`), mTLS notes, and a
+deployment checklist live in [`docs/deployment.md`](docs/deployment.md).
+
 ### Attaching clients (CLI / SDK / tokamak)
 
 The Python SDK and CLI automatically pick up the key from the environment:
@@ -613,11 +621,11 @@ Ordered roughly by value; each item is small enough for one feature branch
 (see `AGENTS.md` for the workflow).
 
 **Ship what's half-built (M2 finish)**
-- [ ] Wire the route table: make `ProxyHandler` dispatch through
+- [x] Wire the route table: make `ProxyHandler` dispatch through
       `purslane/routes.py::match()` instead of if-chains, and add the promised
       parity test asserting *documented routes == implemented routes*.
       Until then `routes.py` is dead documentation that can drift silently.
-- [ ] Wire `TimingRecorder`/`SessionMetrics` (`purslane/metrics.py`) into
+- [x] Wire `TimingRecorder`/`SessionMetrics` (`purslane/metrics.py`) into
       `/turns` responses (the `_timings` sidecar + final SSE frame the module
       docstring already describes) — or delete the module. It is currently
       imported by nothing.
@@ -629,17 +637,18 @@ Ordered roughly by value; each item is small enough for one feature branch
       never leaks into visible deltas.
 
 **M7 — harness-only API (documents G1)**
-- [ ] `clm-mem api` subcommand: session verbs only, backend required or mock,
+- [x] `clm-mem api` subcommand: session verbs only, backend required or mock,
       no studio / native passthrough routes. Lets the engine run as a bare
       memory API without the full proxy surface.
 
 **Security follow-ups (post-audit)**
-- [ ] TLS story: document the reverse-proxy + TLS/mTLS setup for any
-      non-loopback deployment (server currently warns, does not terminate TLS).
+- [x] TLS story: documented in `docs/deployment.md` — reverse-proxy + TLS/mTLS
+      setup for non-loopback deployments (the server warns but does not terminate TLS).
 - [ ] Per-route capability split: let a memory-only client get no exec/file/
       web-fetch routes at all (audit C-1 remediation left this as a
       "consider").
-- [ ] Rate limiting on the proxy (no limits today; audit noted it).
+- [x] Rate limiting on the proxy: per-client fixed-window limiter, `/health`
+      exempt, 429 + Retry-After; `--rate-limit` / `CLM_MEM_RATE_LIMIT` (0 disables).
 
 **Housekeeping**
 - [ ] Merge or explicitly drop `fix/search-ddg-lite-fallback` (ddg search fix,
@@ -647,14 +656,12 @@ Ordered roughly by value; each item is small enough for one feature branch
 - [ ] Delete the 410 legacy-header shim once no downstream consumer sends
       `X-Cllm-Mem-*` headers (M5; Unsloth Studio integration is the one to
       check).
-- [ ] Update `AGENTS.md` "Project Orientation" — it still maps old flat
-      `clm_mem/*` paths; refresh to the subpackage layout.
-- [ ] Refresh `docs/library-migration.md`: it targets the now-merged
-      `spike/session-api` branch and `clm_mem/remote.py`; re-point at main +
-      `shatterling/clients/sdk.py`.
-- [ ] Add a `CHANGELOG.md` (0.4.0's breaking rename deserves one).
-- [ ] Clean repo root: remove agent scratch files (`_probe.py`, `_sec.txt`,
-      `_secfix.txt`, `_clmmem_test.txt`) or gitignore the pattern.
+- [x] Update `AGENTS.md` "Project Orientation" — refreshed to the subpackage
+      (`shatterling/{engine,purslane,campion,clients}`) layout.
+- [x] Refresh `docs/library-migration.md` — re-pointed at `main` (0.4.0) +
+      `shatterling/clients/sdk.py` (was the merged `spike/session-api` branch).
+- [x] Add a `CHANGELOG.md` (0.4.0's breaking rename + subpackage split).
+- [x] Clean repo root: agent scratch-file patterns gitignored (`_*` scratch).
 
 **0.5 planning**
 - [ ] Remove the deprecated `clm-mem` console-script alias (keep `purslane`).

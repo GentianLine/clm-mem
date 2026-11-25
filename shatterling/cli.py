@@ -995,7 +995,25 @@ def _add_serve_flags(sub: argparse.ArgumentParser) -> None:
         "are answered. Use '*' to allow all (NOT recommended without "
         "--api-key). Falls back to $CLM_MEM_CORS_ORIGINS env var.",
     )
+    sub.add_argument(
+        "--rate-limit",
+        type=int,
+        default=None,
+        help="max requests per minute per client IP (0 disables rate limiting). "
+        "Default 600; falls back to $CLM_MEM_RATE_LIMIT env var when unset.",
+    )
     _add_harness_flags(sub)
+
+
+def cmd_api(a: argparse.Namespace) -> None:
+    """Bare memory API: session verbs only, no proxy/studio/native routes.
+
+    Exposes /v1/clm/* and /health. No llama.cpp passthrough, no OpenAI
+    chat completions, no decision proxy, no MCP, no web studio.
+    """
+    a.ui = False  # disable the web studio
+    a.api_only = True  # restrict routes to CLM session verbs + health
+    cmd_serve(a)
 
 
 def cmd_serve(a: argparse.Namespace) -> None:
@@ -1077,8 +1095,10 @@ def cmd_serve(a: argparse.Namespace) -> None:
         chat_max_tokens=a.max_tokens,
         log_dir=a.log_dir or None,
         ui=a.ui,
+        api_only=getattr(a, "api_only", False),
         api_key=a.api_key,
         cors_origins=cors_origins,
+        rate_limit_per_min=getattr(a, "rate_limit", None),
     )
 
     procs = {h.name: f"{h.host}:{h.port}" for h in sup.manager.handles if h.alive()}
@@ -1173,15 +1193,22 @@ def main(argv: Optional[List[str]] = None) -> None:
         help="llama.cpp-compatible drop-in server "
         "(proxy + backend + optional SystemOne)",
     )
+    sa = sub.add_parser(
+        "api",
+        help="bare memory API (session verbs only, no proxy/studio routes)",
+    )
     for s in (sc, sd):
         _add_common(s)
     _add_serve_flags(ss)
+    _add_serve_flags(sa)
     a = p.parse_args(argv)
     try:
         if a.cmd == "chat":
             cmd_chat(a)
         elif a.cmd == "serve":
             cmd_serve(a)
+        elif a.cmd == "api":
+            cmd_api(a)
         else:
             cmd_demo(a)
     except ValueError as e:

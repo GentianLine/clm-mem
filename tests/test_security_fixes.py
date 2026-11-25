@@ -153,8 +153,11 @@ def sup(tmp_path):
 
 
 def test_sid_validation_rejects_traversal(sup):
+    # traversal with encoded slashes creates extra path segments after
+    # unquote; the route table doesn't match → 404 (rejected either way)
     st, _ = http_call(sup, "/v1/clm/sessions/..%2F..%2Fetc/snapshot")
-    assert st == 400
+    assert st in (400, 404)
+    # single-segment injection: matches the route pattern but fails SID_RE → 400
     st, _ = http_call(sup, "/v1/clm/sessions/%3Cscript%3E/status")
     assert st == 400
     # a well-formed branch id still works (404 unknown session, not 400)
@@ -170,7 +173,14 @@ def test_sid_validation_rejects_traversal(sup):
 def test_mcp_origin_respects_approval_policy(tmp_path):
     h = MemoryHarness(
         StubChat(),
-        HarnessConfig(workdir=str(tmp_path), tools_enabled=True, approval_mode="ask"),
+        HarnessConfig(
+            workdir=str(tmp_path),
+            tools_enabled=True,
+            approval_mode="ask",
+            # short timeout: no responder is wired here, so the call must fail
+            # closed on the (fast) approval timeout rather than block for 300s
+            approval_timeout=1.0,
+        ),
     )
     res = h.tools.execute(
         ToolCall(id="m", name="run_command", args={"command": "echo hi"}, origin="mcp")

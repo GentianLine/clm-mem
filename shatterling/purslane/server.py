@@ -42,8 +42,10 @@ from ..engine.config import HarnessConfig
 from ..engine.harness import MemoryHarness
 from ..engine.llm import OpenAIChat
 from ..tools import ToolCall
+from .metrics import SessionMetrics, TimingRecorder
 from .processes import ProcessManager, free_port, render_flags
-from .security import SecurityConfig
+from .routes import match as _route_match
+from .security import RateLimiter, SecurityConfig
 
 VERSION = "0.3.0"
 #: Legacy header spellings are NOT accepted: sending them is a 410 with a
@@ -252,6 +254,7 @@ class ProxyConfig:
     chat_max_tokens: int = 1024
     request_timeout: float = 300.0
     ui_enabled: bool = True  # serve the bundled web studio at /
+    api_only: bool = False  # restrict to /v1/clm/* + /health (no proxy/studio)
     backend_ctx: Optional[int] = None  # live llama.cpp window (from /props)
     security: SecurityConfig = field(default_factory=SecurityConfig)
 
@@ -454,11 +457,11 @@ class ProxyHandler(BaseHTTPRequestHandler):
     def _harness_for(self, sid: str, model: str, chat: Optional[str] = None):
         return self.supervisor.harness_for(sid, model, chat=chat)
 
-    def _sse_reply(self, sid: str, model: str, reply: str, events=None):
+    def _sse_reply(self, sid: str, model: str, reply: str, events=None, timings=None):
         """Stream one turn as SSE: role chunk, content deltas, clm event
-        chunks (``event: clm-mem-event`` with the chip payload), then
-        ``[DONE]``. Used by the turns endpoint; the payload shape is the
-        contract clients parse."""
+        chunks (``event: clm-mem-event`` with the chip payload), optional
+        ``clm-mem-timings`` sidecar, then ``[DONE]``. Used by the turns
+        endpoint; the payload shape is the contract clients parse."""
         self._start_sse()
         created = int(time.time())
 
@@ -492,6 +495,13 @@ class ProxyHandler(BaseHTTPRequestHandler):
             self.wfile.write(f"data: {json.dumps(payload)}\n\n".encode())
             self.wfile.flush()
         chunk({}, finish="stop")
+        # timing sidecar as the final SSE event before [DONE]
+        if timings:
+            t_body = {"type": "clm-mem-timings", **timings}
+            self.wfile.write(b"event: clm-mem-timings\n")
+            self.wfile.write(
+                f"data: {json.dumps(t_body, separators=(',', ':'))}\n\n".encode()
+            )
         self.wfile.write(b"data: [DONE]\n\n")
         self.wfile.flush()
 
@@ -499,6 +509,9 @@ class ProxyHandler(BaseHTTPRequestHandler):
     def do_OPTIONS(self):
         # CORS preflight: always answer 204 (browsers need this before
         # sending the real request). Auth is checked on the actual request.
+        path = unquote(self.path.split("?")[0])
+        if self._api_only_reject(path):
+            return
         self.send_response(204)
         self._cors()
         self.end_headers()
@@ -562,16 +575,83 @@ class ProxyHandler(BaseHTTPRequestHandler):
             return
         self.send_json(resp)
 
+    def _rate_limit_check(self, path: str) -> bool:
+        """Per-client (IP) fixed-window rate limit. Returns True if the
+        request was rejected (429 already sent). /health is exempt so load-
+        balancer probes are never throttled."""
+        clean = path.split("?")[0].rstrip("/") or "/"
+        if clean in ("/health", "/v1/health"):
+            return False
+        ip = self.client_address[0] if self.client_address else "?"
+        if self.supervisor.rate_limiter.allow(ip):
+            return False
+        retry = self.supervisor.rate_limiter.retry_after()
+        payload = json.dumps(
+            {
+                "error": {
+                    "message": f"rate limit exceeded; retry in {retry}s",
+                    "type": "proxy",
+                    "code": 429,
+                }
+            }
+        ).encode()
+        self.send_response(429)
+        self._cors()
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Retry-After", str(retry))
+        self.send_header("Content-Length", str(len(payload)))
+        self.end_headers()
+        self.wfile.write(payload)
+        return True
+
+    def _api_only_reject(self, path: str) -> bool:
+        """In api-only mode, only /health and /v1/clm/* are served."""
+        if not self.supervisor.config.api_only:
+            return False
+        if path == "/health" or path.startswith("/v1/clm/"):
+            return False
+        self.send_error_json(404, f"route {path!r} not available in api-only mode")
+        return True
+
     def do_GET(self):
         sup = self.supervisor
         cfg = sup.config
         path = unquote(self.path.split("?")[0])
+        if self._rate_limit_check(path):
+            return
+        # api-only mode gates routes before anything else (incl. the static
+        # studio), so a bare memory API exposes no web UI at all.
+        if self._api_only_reject(path):
+            return
         # static assets are served before auth (the studio shell loads first;
         # its JS then authenticates API calls via the stored key)
         if self._static_route(path):
             return
         if not self._auth_check():
             return
+        # Route-table dispatch: match() tells us which category this is.
+        m = _route_match("GET", path)
+        if m is None:
+            return self.send_error_json(404, f"no route for {path}")
+        cat = m.route.category
+        if cat == "meta":
+            self._dispatch_meta_get(path)
+        elif cat == "mcp":
+            self._dispatch_mcp_banner()
+        elif cat == "native_passthrough":
+            if cfg.backend_root:
+                self._forward("GET", f"{cfg.backend_root}{path}")
+            else:
+                self.send_error_json(404, f"no route for {path}")
+        elif cat in ("session_mgmt", "turns", "agent_surface"):
+            self._clm_get(path)
+        else:
+            self.send_error_json(404, f"no route for {path}")
+
+    def _dispatch_meta_get(self, path: str) -> None:
+        """Handle GET routes in the 'meta' category (health, version, models)."""
+        sup = self.supervisor
+        cfg = sup.config
         if path in ("/health", "/v1/health"):
             with sup.lock:
                 sids = list(sup.sessions)
@@ -605,16 +685,6 @@ class ProxyHandler(BaseHTTPRequestHandler):
                         "workspace_root": sup.workspace_root,
                     }
                 )
-        elif path in ("/mcp", "/v1/mcp"):
-            self.send_json(
-                {
-                    "server": "clm-mem",
-                    "version": VERSION,
-                    "transport": "streamable-http",
-                    "hint": "POST JSON-RPC here "
-                    "(initialize / tools/list / tools/call)",
-                }
-            )
         elif path == "/version":
             self.send_json(
                 {
@@ -646,17 +716,28 @@ class ProxyHandler(BaseHTTPRequestHandler):
                     ],
                 }
             )
-        elif path.startswith("/v1/clm/"):
-            self._clm_get(path)
-        elif path in NATIVE_GET_PATHS and cfg.backend_root:
-            self._forward("GET", f"{cfg.backend_root}{path}")
         else:
             self.send_error_json(404, f"no route for {path}")
+
+    def _dispatch_mcp_banner(self) -> None:
+        """GET /mcp — transport info banner."""
+        self.send_json(
+            {
+                "server": "clm-mem",
+                "version": VERSION,
+                "transport": "streamable-http",
+                "hint": "POST JSON-RPC here " "(initialize / tools/list / tools/call)",
+            }
+        )
 
     def do_DELETE(self):
         sup = self.supervisor
         path = unquote(self.path.split("?")[0])
+        if self._rate_limit_check(path):
+            return
         if not self._auth_check():
+            return
+        if self._api_only_reject(path):
             return
         if path.startswith("/v1/clm/sessions/"):
             parts = [p for p in unquote(path).split("/") if p]
@@ -694,44 +775,62 @@ class ProxyHandler(BaseHTTPRequestHandler):
         sup = self.supervisor
         cfg = sup.config
         path = unquote(self.path.split("?")[0])
+        if self._rate_limit_check(path):
+            return
         if not self._auth_check():
             return
-        if path == "/v1/chat/completions":
-            return self._chat_completions()
-        if path in ("/mcp", "/v1/mcp"):
-            return self._mcp()
-        if path in DECISION_PATHS:
-            # Providers expose the same request/response contract under
-            # different URL structures; whatever spelling arrives from the
-            # client is answered from cfg.systemone_endpoint -- the complete
-            # endpoint URL exactly as configured, used verbatim with nothing
-            # appended to it.
-            target = cfg.systemone_endpoint
-            if not target:
-                self.send_error_json(503, "systemone is not configured")
-                return
-            try:
-                body = self.read_body_bytes()
-            except BodyTooLarge:
-                return  # 413 already sent
-            # credential for the decision hop: explicit systemone key (or
-            # $FEATHERLESS_API_KEY); fall back to the backend key only when
-            # the decision server *is* the chat backend (fork passthrough),
-            # and otherwise relay whatever the client brought.
-            auth = cfg.systemone_api_key or os.environ.get("FEATHERLESS_API_KEY", "")
-            if not auth and _same_origin(cfg.systemone_endpoint, cfg.backend_root):
-                auth = cfg.backend_api_key
-            self._forward("POST", target, body, api_key=auth)
-        if path.startswith("/v1/clm/"):
-            return self._clm_post(path)
-        if path in NATIVE_POST_PATHS and cfg.backend_root:
-            try:
-                body = self.read_body_bytes()
-            except BodyTooLarge:
-                return  # 413 already sent
-            self._forward("POST", f"{cfg.backend_root}{path}", body)
+        if self._api_only_reject(path):
             return
-        self.send_error_json(404, f"no route for {path}")
+        # Route-table dispatch: match() tells us which category this is.
+        m = _route_match("POST", path)
+        if m is None:
+            return self.send_error_json(404, f"no route for {path}")
+        cat = m.route.category
+        if cat == "decision_proxy":
+            if path == "/v1/chat/completions":
+                return self._chat_completions()
+            return self._dispatch_systemone(path)
+        elif cat == "mcp":
+            return self._mcp()
+        elif cat in ("session_mgmt", "turns", "agent_surface"):
+            return self._clm_post(path)
+        elif cat == "native_passthrough":
+            if cfg.backend_root:
+                try:
+                    body = self.read_body_bytes()
+                except BodyTooLarge:
+                    return  # 413 already sent
+                self._forward("POST", f"{cfg.backend_root}{path}", body)
+                return
+            else:
+                self.send_error_json(404, f"no route for {path}")
+        else:
+            self.send_error_json(404, f"no route for {path}")
+
+    def _dispatch_systemone(self, path: str) -> None:
+        """Forward a decision-proxy POST to the configured systemone endpoint."""
+        cfg = self.supervisor.config
+        # Providers expose the same request/response contract under
+        # different URL structures; whatever spelling arrives from the
+        # client is answered from cfg.systemone_endpoint -- the complete
+        # endpoint URL exactly as configured, used verbatim with nothing
+        # appended to it.
+        target = cfg.systemone_endpoint
+        if not target:
+            self.send_error_json(503, "systemone is not configured")
+            return
+        try:
+            body = self.read_body_bytes()
+        except BodyTooLarge:
+            return  # 413 already sent
+        # credential for the decision hop: explicit systemone key (or
+        # $FEATHERLESS_API_KEY); fall back to the backend key only when
+        # the decision server *is* the chat backend (fork passthrough),
+        # and otherwise relay whatever the client brought.
+        auth = cfg.systemone_api_key or os.environ.get("FEATHERLESS_API_KEY", "")
+        if not auth and _same_origin(cfg.systemone_endpoint, cfg.backend_root):
+            auth = cfg.backend_api_key
+        self._forward("POST", target, body, api_key=auth)
 
     # -- clm-mem introspection / studio API -----------------------------------
     def _read_json_body(self):
@@ -1327,6 +1426,8 @@ class ProxyHandler(BaseHTTPRequestHandler):
         model = body.get("model") or sup.meta.get(sid, {}).get(
             "model", cfg.served_model
         )
+        # timing capture for the _timings sidecar + session metrics
+        rec = TimingRecorder(stream=bool(body.get("stream")), model=model)
         # per-request generation knobs belong to the turn, not the branch
         restore: Dict[str, object] = {}
         for attr in _TURN_LLM_ATTRS:
@@ -1364,8 +1465,16 @@ class ProxyHandler(BaseHTTPRequestHandler):
             for attr, val in restore.items():
                 if hasattr(h.llm, attr):
                     setattr(h.llm, attr, val)
+        # finalize timing: token estimate from reply length (no usage data
+        # from the mock backends; real backends would provide exact counts)
+        rec.tokens_generated = max(1, len(reply) // 4)
+        rec.input_tokens = h.tokens()
+        rec.mark_end()
+        # update per-session rolling metrics
+        sm = sup.metrics.setdefault(sid, SessionMetrics())
+        sm.record(rec)
         if body.get("stream"):
-            self._sse_reply(sid, model, reply, events=events)
+            self._sse_reply(sid, model, reply, events=events, timings=rec.payload())
             return
         payload = {
             "id": f"clm-mem-{sid}",
@@ -1395,6 +1504,7 @@ class ProxyHandler(BaseHTTPRequestHandler):
                 "events": events,
                 "chats": h.chat_slots(),
             },
+            "_timings": rec.payload(),
         }
         self.send_json(payload)
 
@@ -1442,6 +1552,11 @@ class Supervisor:
         #: slots seen, open-time config template). Fork/lineage fields
         #: (`from`/parent) belong here when sharing gets designed.
         self.meta: Dict[str, Dict] = {}
+        #: Per-session rolling timing metrics (tok/s, TTFB history).
+        self.metrics: Dict[str, SessionMetrics] = {}
+        #: Per-supervisor request limiter (DoS protection). One per server so
+        #: separate instances / tests do not share a budget.
+        self.rate_limiter = RateLimiter(config.security.rate_limit_per_min)
         self.lock = threading.Lock()
         self.thread = threading.Thread(
             target=server.serve_forever, daemon=True, name="clm-mem-proxy"
@@ -1698,8 +1813,10 @@ def start_supervisor(
     log_dir: Optional[str] = None,
     timeout: float = 90.0,
     ui: bool = True,
+    api_only: bool = False,
     api_key: str = "",
     cors_origins: tuple = (),
+    rate_limit_per_min: Optional[int] = None,
 ) -> Supervisor:
     """Bring up the whole stack and return a running :class:`Supervisor`.
 
@@ -1806,15 +1923,23 @@ def start_supervisor(
             backend_ctx or HarnessConfig().max_context_tokens
         )
 
+    # Resolve rate limit: explicit arg > $CLM_MEM_RATE_LIMIT env > default 600.
+    if rate_limit_per_min is None:
+        _rl = os.environ.get("CLM_MEM_RATE_LIMIT", "")
+        rate_limit_per_min = int(_rl) if _rl.strip().lstrip("-").isdigit() else 600
+
     # Build security config: explicit args override env vars
     if api_key or cors_origins:
         sec = SecurityConfig(
             api_key=api_key,
             cors_origins=tuple(cors_origins) if cors_origins else (),
             bind_host=public_host,
+            rate_limit_per_min=rate_limit_per_min,
         )
     else:
-        sec = SecurityConfig.from_env(bind_host=public_host)
+        sec = SecurityConfig.from_env(
+            bind_host=public_host, rate_limit_per_min=rate_limit_per_min
+        )
 
     # Refuse to start on a dangerous config rather than merely warning: a
     # non-loopback bind with no API key is an unauthenticated RCE primitive.
@@ -1837,6 +1962,7 @@ def start_supervisor(
         chat_temperature=chat_temperature,
         chat_max_tokens=chat_max_tokens,
         ui_enabled=bool(ui),
+        api_only=api_only,
         security=sec,
     )
 
