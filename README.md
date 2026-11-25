@@ -331,6 +331,14 @@ The server prints warnings to stderr when it detects dangerous configurations:
 - CORS set to `*` with no authentication (CSRF risk)
 - Non-loopback bind without auth (LAN exposure)
 
+### TLS / reverse-proxy deployment
+
+The server is plain HTTP and does **not** terminate TLS. For any deployment
+reachable beyond localhost, put a TLS-terminating reverse proxy in front of it
+and enable `--api-key`. Full topologies, nginx/Caddy configs (including the
+Server-Sent-Events buffering gotcha for `/turns`), mTLS notes, and a
+deployment checklist live in [`docs/deployment.md`](docs/deployment.md).
+
 ### Attaching clients (CLI / SDK / tokamak)
 
 The Python SDK and CLI automatically pick up the key from the environment:
