@@ -995,6 +995,13 @@ def _add_serve_flags(sub: argparse.ArgumentParser) -> None:
         "are answered. Use '*' to allow all (NOT recommended without "
         "--api-key). Falls back to $CLM_MEM_CORS_ORIGINS env var.",
     )
+    sub.add_argument(
+        "--rate-limit",
+        type=int,
+        default=None,
+        help="max requests per minute per client IP (0 disables rate limiting). "
+        "Default 600; falls back to $CLM_MEM_RATE_LIMIT env var when unset.",
+    )
     _add_harness_flags(sub)
 
 
@@ -1091,6 +1098,7 @@ def cmd_serve(a: argparse.Namespace) -> None:
         api_only=getattr(a, "api_only", False),
         api_key=a.api_key,
         cors_origins=cors_origins,
+        rate_limit_per_min=getattr(a, "rate_limit", None),
     )
 
     procs = {h.name: f"{h.host}:{h.port}" for h in sup.manager.handles if h.alive()}

@@ -165,6 +165,40 @@ def test_api_only_exposes_only_clm_verbs(tmp_path):
         s.shutdown()
 
 
+# -- rate limiting (audit: "no limits today") ---------------------------------
+def test_rate_limit_returns_429_and_exempts_health(tmp_path):
+    """A low per-minute budget yields 429 + Retry-After once exhausted, while
+    /health (load-balancer probes) is never throttled."""
+    s = start_supervisor(
+        public_port=0,
+        served_model="mock-model",
+        backend_mode="mock",
+        systemone_mode="mock",
+        rate_limit_per_min=3,
+        harness_kwargs={"workdir": str(tmp_path), "max_context_tokens": 600},
+        timeout=30,
+    )
+    try:
+        # first few requests are fine
+        for _ in range(3):
+            st, _ = http_call(s, "/v1/clm/sessions")
+            assert st == 200
+        # the next one trips the limiter -> 429 with a Retry-After header
+        req = urllib.request.Request(f"{s.base_url}/v1/clm/sessions", method="GET")
+        try:
+            urllib.request.urlopen(req, timeout=30)
+            assert False, "expected 429 after exhausting the rate limit"
+        except urllib.error.HTTPError as e:
+            assert e.code == 429
+            assert int(e.headers.get("Retry-After", "0")) >= 1
+
+        # /health is exempt and still answers even while over budget
+        st, health = http_call(s, "/health")
+        assert st == 200 and health["status"] == "ok"
+    finally:
+        s.shutdown()
+
+
 def _open_branch(sup, sid, **opts):
     """Open a memory branch the explicit way (POST /v1/clm/sessions)."""
     body = {"session": sid}

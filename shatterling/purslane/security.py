@@ -15,8 +15,10 @@ import hmac
 import logging
 import os
 import secrets
+import threading
+import time
 from dataclasses import dataclass, field
-from typing import List, Optional, Set
+from typing import Dict, List, Optional, Set
 
 log = logging.getLogger("clm-mem.security")
 
@@ -54,6 +56,46 @@ def _is_loopback(host: str) -> bool:
     return host in ("127.0.0.1", "::1", "localhost", "")
 
 
+class RateLimiter:
+    """Fixed-window per-key request limiter (DoS protection).
+
+    Keys are typically client IPs. A limit of ``<= 0`` disables limiting.
+    Thread-safe; create one instance per supervisor so separate server
+    instances (and tests) do not share a budget.
+    """
+
+    def __init__(self, limit_per_min: int):
+        self.limit = int(limit_per_min)
+        self._lock = threading.Lock()
+        # key -> [minute_bucket, count]; the bucket is time.time() // 60
+        self._windows: Dict[str, List[int]] = {}
+
+    def allow(self, key: str) -> bool:
+        """Return True (and count the request) if within budget, else False."""
+        if self.limit <= 0:
+            return True
+        bucket = int(time.time() // 60)
+        with self._lock:
+            rec = self._windows.get(key)
+            if rec is None or rec[0] != bucket:
+                rec = [bucket, 0]
+                self._windows[key] = rec
+            if rec[1] >= self.limit:
+                return False
+            rec[1] += 1
+            # opportunistic prune so an attacker flooding many source keys
+            # cannot grow the map without bound
+            if len(self._windows) > 8192:
+                stale = [k for k, v in self._windows.items() if v[0] != bucket]
+                for k in stale:
+                    del self._windows[k]
+        return True
+
+    def retry_after(self) -> int:
+        """Seconds until the current minute-window rolls over (for 429)."""
+        return max(1, int(60 - (time.time() % 60)) + 1)
+
+
 @dataclass
 class SecurityConfig:
     """Security settings for the purslane proxy.
@@ -80,6 +122,10 @@ class SecurityConfig:
     #: the header is an unnecessary CSRF/credential-leak surface. Set True
     #: only if a browser client genuinely requires cookie credentials.
     allow_credentials: bool = False
+    #: Max requests per minute per client key (IP). ``0`` disables limiting.
+    #: On by default with a generous ceiling so ordinary use is unaffected but
+    #: naive abuse / runaway clients are throttled (audit: "no limits today").
+    rate_limit_per_min: int = 600
 
     @classmethod
     def from_env(cls, **overrides) -> "SecurityConfig":
@@ -92,6 +138,9 @@ class SecurityConfig:
         api_key = overrides.pop("api_key", os.environ.get("CLM_MEM_API_KEY", ""))
         cors_raw = overrides.pop(
             "cors_origins", os.environ.get("CLM_MEM_CORS_ORIGINS", "")
+        )
+        rate_raw = overrides.pop(
+            "rate_limit_per_min", os.environ.get("CLM_MEM_RATE_LIMIT", "")
         )
         cors_origins: tuple = (
             tuple(o.strip() for o in cors_raw.split(",") if o.strip())
@@ -108,11 +157,15 @@ class SecurityConfig:
             if allow_creds_raw is not None
             else False
         )
+        rate_limit_per_min = (
+            int(rate_raw) if str(rate_raw).strip().lstrip("-").isdigit() else 600
+        )
         return cls(
             api_key=api_key,
             cors_origins=cors_origins,
             bind_host=bind_host,
             allow_credentials=allow_credentials,
+            rate_limit_per_min=rate_limit_per_min,
         )
 
     # -- auth helpers -------------------------------------------------------

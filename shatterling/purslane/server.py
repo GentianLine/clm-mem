@@ -45,7 +45,7 @@ from ..tools import ToolCall
 from .metrics import SessionMetrics, TimingRecorder
 from .processes import ProcessManager, free_port, render_flags
 from .routes import match as _route_match
-from .security import SecurityConfig
+from .security import RateLimiter, SecurityConfig
 
 VERSION = "0.3.0"
 #: Legacy header spellings are NOT accepted: sending them is a 410 with a
@@ -575,6 +575,35 @@ class ProxyHandler(BaseHTTPRequestHandler):
             return
         self.send_json(resp)
 
+    def _rate_limit_check(self, path: str) -> bool:
+        """Per-client (IP) fixed-window rate limit. Returns True if the
+        request was rejected (429 already sent). /health is exempt so load-
+        balancer probes are never throttled."""
+        clean = path.split("?")[0].rstrip("/") or "/"
+        if clean in ("/health", "/v1/health"):
+            return False
+        ip = self.client_address[0] if self.client_address else "?"
+        if self.supervisor.rate_limiter.allow(ip):
+            return False
+        retry = self.supervisor.rate_limiter.retry_after()
+        payload = json.dumps(
+            {
+                "error": {
+                    "message": f"rate limit exceeded; retry in {retry}s",
+                    "type": "proxy",
+                    "code": 429,
+                }
+            }
+        ).encode()
+        self.send_response(429)
+        self._cors()
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Retry-After", str(retry))
+        self.send_header("Content-Length", str(len(payload)))
+        self.end_headers()
+        self.wfile.write(payload)
+        return True
+
     def _api_only_reject(self, path: str) -> bool:
         """In api-only mode, only /health and /v1/clm/* are served."""
         if not self.supervisor.config.api_only:
@@ -588,6 +617,8 @@ class ProxyHandler(BaseHTTPRequestHandler):
         sup = self.supervisor
         cfg = sup.config
         path = unquote(self.path.split("?")[0])
+        if self._rate_limit_check(path):
+            return
         # api-only mode gates routes before anything else (incl. the static
         # studio), so a bare memory API exposes no web UI at all.
         if self._api_only_reject(path):
@@ -702,6 +733,8 @@ class ProxyHandler(BaseHTTPRequestHandler):
     def do_DELETE(self):
         sup = self.supervisor
         path = unquote(self.path.split("?")[0])
+        if self._rate_limit_check(path):
+            return
         if not self._auth_check():
             return
         if self._api_only_reject(path):
@@ -742,6 +775,8 @@ class ProxyHandler(BaseHTTPRequestHandler):
         sup = self.supervisor
         cfg = sup.config
         path = unquote(self.path.split("?")[0])
+        if self._rate_limit_check(path):
+            return
         if not self._auth_check():
             return
         if self._api_only_reject(path):
@@ -1519,6 +1554,9 @@ class Supervisor:
         self.meta: Dict[str, Dict] = {}
         #: Per-session rolling timing metrics (tok/s, TTFB history).
         self.metrics: Dict[str, SessionMetrics] = {}
+        #: Per-supervisor request limiter (DoS protection). One per server so
+        #: separate instances / tests do not share a budget.
+        self.rate_limiter = RateLimiter(config.security.rate_limit_per_min)
         self.lock = threading.Lock()
         self.thread = threading.Thread(
             target=server.serve_forever, daemon=True, name="clm-mem-proxy"
@@ -1778,6 +1816,7 @@ def start_supervisor(
     api_only: bool = False,
     api_key: str = "",
     cors_origins: tuple = (),
+    rate_limit_per_min: Optional[int] = None,
 ) -> Supervisor:
     """Bring up the whole stack and return a running :class:`Supervisor`.
 
@@ -1884,15 +1923,23 @@ def start_supervisor(
             backend_ctx or HarnessConfig().max_context_tokens
         )
 
+    # Resolve rate limit: explicit arg > $CLM_MEM_RATE_LIMIT env > default 600.
+    if rate_limit_per_min is None:
+        _rl = os.environ.get("CLM_MEM_RATE_LIMIT", "")
+        rate_limit_per_min = int(_rl) if _rl.strip().lstrip("-").isdigit() else 600
+
     # Build security config: explicit args override env vars
     if api_key or cors_origins:
         sec = SecurityConfig(
             api_key=api_key,
             cors_origins=tuple(cors_origins) if cors_origins else (),
             bind_host=public_host,
+            rate_limit_per_min=rate_limit_per_min,
         )
     else:
-        sec = SecurityConfig.from_env(bind_host=public_host)
+        sec = SecurityConfig.from_env(
+            bind_host=public_host, rate_limit_per_min=rate_limit_per_min
+        )
 
     # Refuse to start on a dangerous config rather than merely warning: a
     # non-loopback bind with no API key is an unauthenticated RCE primitive.
