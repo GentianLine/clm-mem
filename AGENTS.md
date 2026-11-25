@@ -137,15 +137,29 @@ Before calling work done:
 
 ## Project Orientation (for a quick start)
 
-- `clm_mem/harness.py` — the live window + eviction engine (phases 1–3).
-- `clm_mem/tagging.py` — inline `<longterm>/<shortterm>` parsing and the
-  post-turn router pass.
-- `clm_mem/blocks.py`, `tokens.py`, `config.py` — block model, token counting,
-  settings.
-- `clm_mem/processes.py`, `remote.py`, `mcp.py`, `server.py` — serving surfaces.
-- `clm_mem/static/` — the browser UI (mirrored to package data).
-- README explains the CLM design and the three-phase eviction table; read it
-  before touching eviction semantics.
+The package is `shatterling` (renamed from `clm_mem` in 0.4.0), split into
+subpackages:
+
+- `shatterling/engine/` — the memory core:
+  - `harness.py` — live window + eviction engine (phases 1–3).
+  - `tagging.py` — inline `<longterm>/<shortterm>` parsing and post-turn router.
+  - `blocks.py`, `tokens.py`, `config.py` — block model, token counting, settings.
+  - `llm.py` — OpenAI-compatible chat client wrapper.
+- `shatterling/purslane/` — the proxy/serving surface:
+  - `server.py` — HTTP server (ProxyHandler + routes).
+  - `routes.py` — declarative route table (`match()` dispatch).
+  - `metrics.py` — TimingRecorder / SessionMetrics.
+  - `mcp.py` — MCP tool server.
+  - `processes.py` — subprocess management for sandboxed tools.
+  - `security.py` — auth, API keys, CORS.
+  - `mock_backends.py` — mock LLM backends for tests.
+- `shatterling/campion/` — the browser UI (HTML/JS/CSS, served as package data).
+- `shatterling/clients/sdk.py` — the Python SDK client.
+- `shatterling/tools/` — tool execution (sandbox, web fetch, manager).
+- `shatterling/cli.py` — CLI entry point (`purslane` / `clm-mem`).
+
+README explains the CLM design and the three-phase eviction table; read it
+before touching eviction semantics.
 
 ## Non-Negotiables
 
