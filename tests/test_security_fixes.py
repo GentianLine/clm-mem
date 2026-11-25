@@ -173,7 +173,14 @@ def test_sid_validation_rejects_traversal(sup):
 def test_mcp_origin_respects_approval_policy(tmp_path):
     h = MemoryHarness(
         StubChat(),
-        HarnessConfig(workdir=str(tmp_path), tools_enabled=True, approval_mode="ask"),
+        HarnessConfig(
+            workdir=str(tmp_path),
+            tools_enabled=True,
+            approval_mode="ask",
+            # short timeout: no responder is wired here, so the call must fail
+            # closed on the (fast) approval timeout rather than block for 300s
+            approval_timeout=1.0,
+        ),
     )
     res = h.tools.execute(
         ToolCall(id="m", name="run_command", args={"command": "echo hi"}, origin="mcp")

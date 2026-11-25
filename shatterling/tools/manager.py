@@ -113,7 +113,10 @@ class ApprovalBroker:
             except Exception:
                 ok = False
             return self._finish(rec, ok, "responder")
-        deadline = time.time() + max(5.0, self.timeout)
+        # Honor the configured timeout so short values (used by tests and
+        # automation) are respected; floor at one poll tick to avoid spinning
+        # on a zero/negative value.
+        deadline = time.time() + max(float(self.timeout), 0.25)
         while True:
             with self._lock:
                 if rec.decided is not None:
