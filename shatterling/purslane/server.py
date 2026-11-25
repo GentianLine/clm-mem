@@ -42,7 +42,9 @@ from ..engine.config import HarnessConfig
 from ..engine.harness import MemoryHarness
 from ..engine.llm import OpenAIChat
 from ..tools import ToolCall
+from .metrics import SessionMetrics, TimingRecorder
 from .processes import ProcessManager, free_port, render_flags
+from .routes import match as _route_match
 from .security import SecurityConfig
 
 VERSION = "0.3.0"
@@ -572,6 +574,29 @@ class ProxyHandler(BaseHTTPRequestHandler):
             return
         if not self._auth_check():
             return
+        # Route-table dispatch: match() tells us which category this is.
+        m = _route_match("GET", path)
+        if m is None:
+            return self.send_error_json(404, f"no route for {path}")
+        cat = m.route.category
+        if cat == "meta":
+            self._dispatch_meta_get(path)
+        elif cat == "mcp":
+            self._dispatch_mcp_banner()
+        elif cat == "native_passthrough":
+            if cfg.backend_root:
+                self._forward("GET", f"{cfg.backend_root}{path}")
+            else:
+                self.send_error_json(404, f"no route for {path}")
+        elif cat in ("session_mgmt", "turns", "agent_surface"):
+            self._clm_get(path)
+        else:
+            self.send_error_json(404, f"no route for {path}")
+
+    def _dispatch_meta_get(self, path: str) -> None:
+        """Handle GET routes in the 'meta' category (health, version, models)."""
+        sup = self.supervisor
+        cfg = sup.config
         if path in ("/health", "/v1/health"):
             with sup.lock:
                 sids = list(sup.sessions)
@@ -605,16 +630,6 @@ class ProxyHandler(BaseHTTPRequestHandler):
                         "workspace_root": sup.workspace_root,
                     }
                 )
-        elif path in ("/mcp", "/v1/mcp"):
-            self.send_json(
-                {
-                    "server": "clm-mem",
-                    "version": VERSION,
-                    "transport": "streamable-http",
-                    "hint": "POST JSON-RPC here "
-                    "(initialize / tools/list / tools/call)",
-                }
-            )
         elif path == "/version":
             self.send_json(
                 {
@@ -646,12 +661,20 @@ class ProxyHandler(BaseHTTPRequestHandler):
                     ],
                 }
             )
-        elif path.startswith("/v1/clm/"):
-            self._clm_get(path)
-        elif path in NATIVE_GET_PATHS and cfg.backend_root:
-            self._forward("GET", f"{cfg.backend_root}{path}")
         else:
             self.send_error_json(404, f"no route for {path}")
+
+    def _dispatch_mcp_banner(self) -> None:
+        """GET /mcp — transport info banner."""
+        self.send_json(
+            {
+                "server": "clm-mem",
+                "version": VERSION,
+                "transport": "streamable-http",
+                "hint": "POST JSON-RPC here "
+                "(initialize / tools/list / tools/call)",
+            }
+        )
 
     def do_DELETE(self):
         sup = self.supervisor
@@ -696,42 +719,56 @@ class ProxyHandler(BaseHTTPRequestHandler):
         path = unquote(self.path.split("?")[0])
         if not self._auth_check():
             return
-        if path == "/v1/chat/completions":
-            return self._chat_completions()
-        if path in ("/mcp", "/v1/mcp"):
+        # Route-table dispatch: match() tells us which category this is.
+        m = _route_match("POST", path)
+        if m is None:
+            return self.send_error_json(404, f"no route for {path}")
+        cat = m.route.category
+        if cat == "decision_proxy":
+            if path == "/v1/chat/completions":
+                return self._chat_completions()
+            return self._dispatch_systemone(path)
+        elif cat == "mcp":
             return self._mcp()
-        if path in DECISION_PATHS:
-            # Providers expose the same request/response contract under
-            # different URL structures; whatever spelling arrives from the
-            # client is answered from cfg.systemone_endpoint -- the complete
-            # endpoint URL exactly as configured, used verbatim with nothing
-            # appended to it.
-            target = cfg.systemone_endpoint
-            if not target:
-                self.send_error_json(503, "systemone is not configured")
-                return
-            try:
-                body = self.read_body_bytes()
-            except BodyTooLarge:
-                return  # 413 already sent
-            # credential for the decision hop: explicit systemone key (or
-            # $FEATHERLESS_API_KEY); fall back to the backend key only when
-            # the decision server *is* the chat backend (fork passthrough),
-            # and otherwise relay whatever the client brought.
-            auth = cfg.systemone_api_key or os.environ.get("FEATHERLESS_API_KEY", "")
-            if not auth and _same_origin(cfg.systemone_endpoint, cfg.backend_root):
-                auth = cfg.backend_api_key
-            self._forward("POST", target, body, api_key=auth)
-        if path.startswith("/v1/clm/"):
+        elif cat in ("session_mgmt", "turns", "agent_surface"):
             return self._clm_post(path)
-        if path in NATIVE_POST_PATHS and cfg.backend_root:
-            try:
-                body = self.read_body_bytes()
-            except BodyTooLarge:
-                return  # 413 already sent
-            self._forward("POST", f"{cfg.backend_root}{path}", body)
+        elif cat == "native_passthrough":
+            if cfg.backend_root:
+                try:
+                    body = self.read_body_bytes()
+                except BodyTooLarge:
+                    return  # 413 already sent
+                self._forward("POST", f"{cfg.backend_root}{path}", body)
+                return
+            else:
+                self.send_error_json(404, f"no route for {path}")
+        else:
+            self.send_error_json(404, f"no route for {path}")
+
+    def _dispatch_systemone(self, path: str) -> None:
+        """Forward a decision-proxy POST to the configured systemone endpoint."""
+        cfg = self.supervisor.config
+        # Providers expose the same request/response contract under
+        # different URL structures; whatever spelling arrives from the
+        # client is answered from cfg.systemone_endpoint -- the complete
+        # endpoint URL exactly as configured, used verbatim with nothing
+        # appended to it.
+        target = cfg.systemone_endpoint
+        if not target:
+            self.send_error_json(503, "systemone is not configured")
             return
-        self.send_error_json(404, f"no route for {path}")
+        try:
+            body = self.read_body_bytes()
+        except BodyTooLarge:
+            return  # 413 already sent
+        # credential for the decision hop: explicit systemone key (or
+        # $FEATHERLESS_API_KEY); fall back to the backend key only when
+        # the decision server *is* the chat backend (fork passthrough),
+        # and otherwise relay whatever the client brought.
+        auth = cfg.systemone_api_key or os.environ.get("FEATHERLESS_API_KEY", "")
+        if not auth and _same_origin(cfg.systemone_endpoint, cfg.backend_root):
+            auth = cfg.backend_api_key
+        self._forward("POST", target, body, api_key=auth)
 
     # -- clm-mem introspection / studio API -----------------------------------
     def _read_json_body(self):

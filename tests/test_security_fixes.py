@@ -153,8 +153,11 @@ def sup(tmp_path):
 
 
 def test_sid_validation_rejects_traversal(sup):
+    # traversal with encoded slashes creates extra path segments after
+    # unquote; the route table doesn't match → 404 (rejected either way)
     st, _ = http_call(sup, "/v1/clm/sessions/..%2F..%2Fetc/snapshot")
-    assert st == 400
+    assert st in (400, 404)
+    # single-segment injection: matches the route pattern but fails SID_RE → 400
     st, _ = http_call(sup, "/v1/clm/sessions/%3Cscript%3E/status")
     assert st == 400
     # a well-formed branch id still works (404 unknown session, not 400)

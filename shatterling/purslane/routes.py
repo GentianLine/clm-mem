@@ -195,6 +195,20 @@ ROUTES: List[Route] = [
     ),
     # -- CLM session sub-resources ------------------------------------------
     Route(
+        "POST",
+        "/v1/clm/sessions/<sid>/reset",
+        "_clm_post->reset",
+        "Reset a session: retire live window, keep archive + other chats",
+        "session_mgmt",
+    ),
+    Route(
+        "POST",
+        "/v1/clm/sessions/<sid>/chat-open",
+        "_clm_post->chat_open",
+        "Open (or re-open) a chat slot; optional seed blocks",
+        "session_mgmt",
+    ),
+    Route(
         "GET",
         "/v1/clm/sessions/<sid>/status",
         "_clm_get->status",
@@ -247,6 +261,13 @@ ROUTES: List[Route] = [
     ),
     Route(
         "POST",
+        "/v1/clm/sessions/<sid>/activity",
+        "_clm_post->_clm_tools_post",
+        "Activity sub-operations (e.g. clear log)",
+        "agent_surface",
+    ),
+    Route(
+        "POST",
         "/v1/clm/sessions/<sid>/toolcall",
         "_clm_post->_clm_tools_post",
         "Execute a tool call (with approval if required)",
@@ -261,9 +282,37 @@ ROUTES: List[Route] = [
     ),
     Route(
         "POST",
+        "/v1/clm/sessions/<sid>/approvals",
+        "_clm_post->_clm_tools_post",
+        "Approve/deny a pending tool call",
+        "agent_surface",
+    ),
+    Route(
+        "GET",
+        "/v1/clm/sessions/<sid>/sandbox",
+        "_clm_get->agent_surface_read",
+        "List sandbox files",
+        "agent_surface",
+    ),
+    Route(
+        "GET",
+        "/v1/clm/sessions/<sid>/sandbox/<sub>",
+        "_clm_get->agent_surface_read",
+        "Sandbox file read (e.g. /file?path=...)",
+        "agent_surface",
+    ),
+    Route(
+        "POST",
         "/v1/clm/sessions/<sid>/sandbox",
         "_clm_post->_clm_tools_post",
         "Execute code in the sandbox (jail/docker)",
+        "agent_surface",
+    ),
+    Route(
+        "POST",
+        "/v1/clm/sessions/<sid>/sandbox/<sub>",
+        "_clm_post->_clm_tools_post",
+        "Sandbox sub-operations (exec, file, write)",
         "agent_surface",
     ),
     Route(
@@ -306,9 +355,23 @@ ROUTES: List[Route] = [
     ),
     Route(
         "DELETE",
+        "/v1/clm/sessions/<sid>/sandbox",
+        "do_DELETE->reset_sandbox",
+        "Reset the sandbox filesystem for a session",
+        "agent_surface",
+    ),
+    Route(
+        "DELETE",
         "/v1/clm/sessions/<sid>",
         "do_DELETE->drop_session",
         "Close and drop a session (archive retained on disk)",
+        "session_mgmt",
+    ),
+    Route(
+        "DELETE",
+        "/v1/clm/workspaces/<name>",
+        "do_DELETE->delete_workspace",
+        "Delete a workspace (branch) and its harness",
         "session_mgmt",
     ),
     # -- Static assets (campion) ---------------------------------------------
