@@ -259,13 +259,7 @@ ROUTES: List[Route] = [
         "Recent tool-call activity log",
         "agent_surface",
     ),
-    Route(
-        "POST",
-        "/v1/clm/sessions/<sid>/activity",
-        "_clm_post->_clm_tools_post",
-        "Activity sub-operations (e.g. clear log)",
-        "agent_surface",
-    ),
+
     Route(
         "POST",
         "/v1/clm/sessions/<sid>/toolcall",
@@ -301,13 +295,7 @@ ROUTES: List[Route] = [
         "Sandbox file read (e.g. /file?path=...)",
         "agent_surface",
     ),
-    Route(
-        "POST",
-        "/v1/clm/sessions/<sid>/sandbox",
-        "_clm_post->_clm_tools_post",
-        "Execute code in the sandbox (jail/docker)",
-        "agent_surface",
-    ),
+
     Route(
         "POST",
         "/v1/clm/sessions/<sid>/sandbox/<sub>",
