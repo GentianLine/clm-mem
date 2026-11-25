@@ -254,6 +254,7 @@ class ProxyConfig:
     chat_max_tokens: int = 1024
     request_timeout: float = 300.0
     ui_enabled: bool = True  # serve the bundled web studio at /
+    api_only: bool = False  # restrict to /v1/clm/* + /health (no proxy/studio)
     backend_ctx: Optional[int] = None  # live llama.cpp window (from /props)
     security: SecurityConfig = field(default_factory=SecurityConfig)
 
@@ -456,9 +457,7 @@ class ProxyHandler(BaseHTTPRequestHandler):
     def _harness_for(self, sid: str, model: str, chat: Optional[str] = None):
         return self.supervisor.harness_for(sid, model, chat=chat)
 
-    def _sse_reply(
-        self, sid: str, model: str, reply: str, events=None, timings=None
-    ):
+    def _sse_reply(self, sid: str, model: str, reply: str, events=None, timings=None):
         """Stream one turn as SSE: role chunk, content deltas, clm event
         chunks (``event: clm-mem-event`` with the chip payload), optional
         ``clm-mem-timings`` sidecar, then ``[DONE]``. Used by the turns
@@ -510,6 +509,9 @@ class ProxyHandler(BaseHTTPRequestHandler):
     def do_OPTIONS(self):
         # CORS preflight: always answer 204 (browsers need this before
         # sending the real request). Auth is checked on the actual request.
+        path = unquote(self.path.split("?")[0])
+        if self._api_only_reject(path):
+            return
         self.send_response(204)
         self._cors()
         self.end_headers()
@@ -573,10 +575,23 @@ class ProxyHandler(BaseHTTPRequestHandler):
             return
         self.send_json(resp)
 
+    def _api_only_reject(self, path: str) -> bool:
+        """In api-only mode, only /health and /v1/clm/* are served."""
+        if not self.supervisor.config.api_only:
+            return False
+        if path == "/health" or path.startswith("/v1/clm/"):
+            return False
+        self.send_error_json(404, f"route {path!r} not available in api-only mode")
+        return True
+
     def do_GET(self):
         sup = self.supervisor
         cfg = sup.config
         path = unquote(self.path.split("?")[0])
+        # api-only mode gates routes before anything else (incl. the static
+        # studio), so a bare memory API exposes no web UI at all.
+        if self._api_only_reject(path):
+            return
         # static assets are served before auth (the studio shell loads first;
         # its JS then authenticates API calls via the stored key)
         if self._static_route(path):
@@ -680,8 +695,7 @@ class ProxyHandler(BaseHTTPRequestHandler):
                 "server": "clm-mem",
                 "version": VERSION,
                 "transport": "streamable-http",
-                "hint": "POST JSON-RPC here "
-                "(initialize / tools/list / tools/call)",
+                "hint": "POST JSON-RPC here " "(initialize / tools/list / tools/call)",
             }
         )
 
@@ -689,6 +703,8 @@ class ProxyHandler(BaseHTTPRequestHandler):
         sup = self.supervisor
         path = unquote(self.path.split("?")[0])
         if not self._auth_check():
+            return
+        if self._api_only_reject(path):
             return
         if path.startswith("/v1/clm/sessions/"):
             parts = [p for p in unquote(path).split("/") if p]
@@ -727,6 +743,8 @@ class ProxyHandler(BaseHTTPRequestHandler):
         cfg = sup.config
         path = unquote(self.path.split("?")[0])
         if not self._auth_check():
+            return
+        if self._api_only_reject(path):
             return
         # Route-table dispatch: match() tells us which category this is.
         m = _route_match("POST", path)
@@ -1757,6 +1775,7 @@ def start_supervisor(
     log_dir: Optional[str] = None,
     timeout: float = 90.0,
     ui: bool = True,
+    api_only: bool = False,
     api_key: str = "",
     cors_origins: tuple = (),
 ) -> Supervisor:
@@ -1896,6 +1915,7 @@ def start_supervisor(
         chat_temperature=chat_temperature,
         chat_max_tokens=chat_max_tokens,
         ui_enabled=bool(ui),
+        api_only=api_only,
         security=sec,
     )
 

@@ -118,6 +118,53 @@ def test_options_cors(sup):
     assert acao is None
 
 
+# -- api-only mode (M7: bare memory API) ---------------------------------------
+def test_api_only_exposes_only_clm_verbs(tmp_path):
+    """`clm-mem api` serves /health + /v1/clm/* and nothing else: no native
+    passthrough, no chat completions, no studio. Every other route -> 404."""
+    s = start_supervisor(
+        public_port=0,
+        served_model="mock-model",
+        backend_mode="mock",
+        systemone_mode="mock",
+        api_only=True,
+        harness_kwargs={"workdir": str(tmp_path), "max_context_tokens": 600},
+        timeout=30,
+    )
+    try:
+        # allowed: health + CLM session verbs
+        st, health = http_call(s, "/health")
+        assert st == 200 and health["status"] == "ok"
+        st, lst = http_call(s, "/v1/clm/sessions")
+        assert st == 200
+        # a session verb actually works end-to-end in api-only mode
+        st, d = http_call(s, "/v1/clm/sessions", "POST", {"session": "ws:api"})
+        assert st in (200, 201), d
+
+        # rejected: native passthrough + chat completions + studio
+        for path in (
+            "/props",
+            "/v1/models",
+            "/v1/chat/completions",
+            "/",
+            "/index.html",
+        ):
+            st, _ = http_call(s, path)
+            assert st == 404, f"{path} should be hidden in api-only mode, got {st}"
+
+        # rejected: OPTIONS preflight on a non-CLM path is also gated
+        req = urllib.request.Request(
+            f"{s.base_url}/v1/chat/completions", method="OPTIONS"
+        )
+        try:
+            resp = urllib.request.urlopen(req, timeout=30)
+            assert False, "OPTIONS on a hidden route should be rejected"
+        except urllib.error.HTTPError as e:
+            assert e.code == 404
+    finally:
+        s.shutdown()
+
+
 def _open_branch(sup, sid, **opts):
     """Open a memory branch the explicit way (POST /v1/clm/sessions)."""
     body = {"session": sid}
