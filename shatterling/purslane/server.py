@@ -456,11 +456,13 @@ class ProxyHandler(BaseHTTPRequestHandler):
     def _harness_for(self, sid: str, model: str, chat: Optional[str] = None):
         return self.supervisor.harness_for(sid, model, chat=chat)
 
-    def _sse_reply(self, sid: str, model: str, reply: str, events=None):
+    def _sse_reply(
+        self, sid: str, model: str, reply: str, events=None, timings=None
+    ):
         """Stream one turn as SSE: role chunk, content deltas, clm event
-        chunks (``event: clm-mem-event`` with the chip payload), then
-        ``[DONE]``. Used by the turns endpoint; the payload shape is the
-        contract clients parse."""
+        chunks (``event: clm-mem-event`` with the chip payload), optional
+        ``clm-mem-timings`` sidecar, then ``[DONE]``. Used by the turns
+        endpoint; the payload shape is the contract clients parse."""
         self._start_sse()
         created = int(time.time())
 
@@ -494,6 +496,13 @@ class ProxyHandler(BaseHTTPRequestHandler):
             self.wfile.write(f"data: {json.dumps(payload)}\n\n".encode())
             self.wfile.flush()
         chunk({}, finish="stop")
+        # timing sidecar as the final SSE event before [DONE]
+        if timings:
+            t_body = {"type": "clm-mem-timings", **timings}
+            self.wfile.write(b"event: clm-mem-timings\n")
+            self.wfile.write(
+                f"data: {json.dumps(t_body, separators=(',', ':'))}\n\n".encode()
+            )
         self.wfile.write(b"data: [DONE]\n\n")
         self.wfile.flush()
 
@@ -1364,6 +1373,8 @@ class ProxyHandler(BaseHTTPRequestHandler):
         model = body.get("model") or sup.meta.get(sid, {}).get(
             "model", cfg.served_model
         )
+        # timing capture for the _timings sidecar + session metrics
+        rec = TimingRecorder(stream=bool(body.get("stream")), model=model)
         # per-request generation knobs belong to the turn, not the branch
         restore: Dict[str, object] = {}
         for attr in _TURN_LLM_ATTRS:
@@ -1401,8 +1412,16 @@ class ProxyHandler(BaseHTTPRequestHandler):
             for attr, val in restore.items():
                 if hasattr(h.llm, attr):
                     setattr(h.llm, attr, val)
+        # finalize timing: token estimate from reply length (no usage data
+        # from the mock backends; real backends would provide exact counts)
+        rec.tokens_generated = max(1, len(reply) // 4)
+        rec.input_tokens = h.tokens()
+        rec.mark_end()
+        # update per-session rolling metrics
+        sm = sup.metrics.setdefault(sid, SessionMetrics())
+        sm.record(rec)
         if body.get("stream"):
-            self._sse_reply(sid, model, reply, events=events)
+            self._sse_reply(sid, model, reply, events=events, timings=rec.payload())
             return
         payload = {
             "id": f"clm-mem-{sid}",
@@ -1432,6 +1451,7 @@ class ProxyHandler(BaseHTTPRequestHandler):
                 "events": events,
                 "chats": h.chat_slots(),
             },
+            "_timings": rec.payload(),
         }
         self.send_json(payload)
 
@@ -1479,6 +1499,8 @@ class Supervisor:
         #: slots seen, open-time config template). Fork/lineage fields
         #: (`from`/parent) belong here when sharing gets designed.
         self.meta: Dict[str, Dict] = {}
+        #: Per-session rolling timing metrics (tok/s, TTFB history).
+        self.metrics: Dict[str, SessionMetrics] = {}
         self.lock = threading.Lock()
         self.thread = threading.Thread(
             target=server.serve_forever, daemon=True, name="clm-mem-proxy"

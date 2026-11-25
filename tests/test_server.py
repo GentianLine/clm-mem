@@ -44,8 +44,8 @@ def sse_call(sup, path, body, headers=None):
     events = []
     for raw_line in resp:
         line = raw_line.decode().strip()
-        if line == "event: clm-mem-event":
-            continue  # the matching `data:` line carries the payload
+        if line in ("event: clm-mem-event", "event: clm-mem-timings"):
+            continue  # named events: skip the event line, handle data below
         if not line.startswith("data: "):
             continue
         payload = line[len("data: ") :]
@@ -58,6 +58,8 @@ def sse_call(sup, path, body, headers=None):
         if obj.get("object") == "clm-mem-event":
             events.append(obj)
             continue
+        if obj.get("type") == "clm-mem-timings":
+            continue  # timing sidecar, not a chat chunk
         delta = obj["choices"][0]["delta"]
         text += delta.get("content", "") or ""
     resp.close()
