@@ -663,15 +663,6 @@ Ordered roughly by value; each item is small enough for one feature branch
 - [x] Add a `CHANGELOG.md` (0.4.0's breaking rename + subpackage split).
 - [x] Clean repo root: agent scratch-file patterns gitignored (`_*` scratch).
 
-**Publishing & 1.0 readiness**
-
-See [`docs/pypi-and-1.0-readiness.md`](docs/pypi-and-1.0-readiness.md) for the
-concrete work to reach PyPI and the two quality gates we hold **1.0** to:
-*Gate S* (safe for a developer to run — esp. making the `jail` isolation limit
-unmissable) and *Gate T* (coverage floor + an end-to-end memory test, i.e.
-"probably works"). Short version: ship an honest 0.x first; call it 1.0 only
-when both gates are fully checked.
-
 **0.5 planning**
 - [ ] Remove the deprecated `clm-mem` console-script alias (keep `purslane`).
 - [ ] Decide distribution name: publish to PyPI as `shatterling`? Rename the

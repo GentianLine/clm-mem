@@ -41,9 +41,9 @@ def test_sandbox_exec_and_files(sb):
 
 def test_sandbox_env_is_scrubbed(sb, monkeypatch):
     monkeypatch.setenv("OPENAI_API_KEY", "super-secret")
-    res = sb.exec('echo "path=$PATH"; echo "secret=${OPENAI_API_KEY:-none}"')
+    res = sb.exec('echo "path_set=${PATH:+yes}"; echo "secret=${OPENAI_API_KEY:-none}"')
     assert "secret=none" in res.stdout  # host secrets never leak
-    assert "path=" in res.stdout and len(res.stdout) > len("path=")
+    assert "path_set=yes" in res.stdout  # PATH still available (not scrubbed)
 
 
 def test_sandbox_timeout_kills_long_command(sb):
